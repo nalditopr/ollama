@@ -338,6 +338,29 @@ static __device__ void quantize_f32_tq3_kv_block(const float * __restrict__ x, b
     }
 }
 
+// TurboQuant TURBO3_0: Lucien2468 3-bit uniform quantization for set_rows
+static __device__ void quantize_f32_turbo3_block(const float * __restrict__ x, block_turbo3_0 * __restrict__ y) {
+    float amax = 0.0f;
+    for (int j = 0; j < 32; j++) {
+        float av = fabsf(x[j]);
+        if (av > amax) amax = av;
+    }
+    float d = amax / 4.0f;
+    float id = d > 0.0f ? 1.0f / d : 0.0f;
+    y->d = __float2half(d);
+    for (int group = 0; group < 4; group++) {
+        uint8_t v[8];
+        for (int j = 0; j < 8; j++) {
+            int q = __float2int_rn(x[group * 8 + j] * id);
+            q = max(-4, min(3, q));
+            v[j] = (uint8_t)(q + 4);
+        }
+        y->qs[group * 3 + 0] = (v[0] & 7) | ((v[1] & 7) << 3) | ((v[2] & 3) << 6);
+        y->qs[group * 3 + 1] = ((v[2] & 4) >> 2) | ((v[3] & 7) << 1) | ((v[4] & 7) << 4) | ((v[5] & 1) << 7);
+        y->qs[group * 3 + 2] = ((v[5] & 6) >> 1) | ((v[6] & 7) << 2) | ((v[7] & 7) << 5);
+    }
+}
+
 // Wrapper functions for cpy.cu compatibility
 static __device__ void cpy_blck_f32_q4_0(const char * cxi, char * cdsti) {
     quantize_f32_q4_0_block((const float *)cxi, (block_q4_0 *)cdsti);

@@ -1,0 +1,93 @@
+{
+  "label": "turbo3-lucien",
+  "model": "qwen3.5:35b-a3b",
+  "timestamp": "2026-03-28 18:32:14",
+  "tests": [
+    {
+      "name": "math_multiply",
+      "category": "factual",
+      "passed": false,
+      "latency_s": 2.07,
+      "expected": "391",
+      "response_preview": "ERROR: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>"
+    },
+    {
+      "name": "math_addition",
+      "category": "factual",
+      "passed": true,
+      "latency_s": 7.013,
+      "expected": "1103",
+      "response_preview": "847 + 256 = **1103**"
+    },
+    {
+      "name": "capital_france",
+      "category": "factual",
+      "passed": true,
+      "latency_s": 0.254,
+      "expected": "Paris",
+      "response_preview": "Paris"
+    },
+    {
+      "name": "capital_japan",
+      "category": "factual",
+      "passed": true,
+      "latency_s": 0.261,
+      "expected": "Tokyo",
+      "response_preview": "Tokyo"
+    },
+    {
+      "name": "code_reverse",
+      "category": "code",
+      "passed": true,
+      "latency_s": 0.255,
+      "expected": "[::-1]",
+      "response_preview": "s[::-1]"
+    },
+    {
+      "name": "code_fizzbuzz",
+      "category": "code",
+      "passed": true,
+      "latency_s": 0.903,
+      "expected": "Fizz",
+      "response_preview": "```python\nprint([f\"{i} Fizz\" if i % 3 == 0 and i % 5 != 0 else f\"{i} Buzz\" if i % 5 == 0 and i % 3 != 0 else f\"{i} FizzBuzz\" if i % 15 == 0 else str(i) for i in range(1, 16)])\n```"
+    },
+    {
+      "name": "reasoning",
+      "category": "reasoning",
+      "passed": true,
+      "latency_s": 0.613,
+      "expected": "No",
+      "response_preview": "No, we cannot conclude that some roses fade quickly because the fact that \"some flowers\" fade quickly does not guarantee that the specific subset of flowers identified as \"roses\" is included in that g"
+    },
+    {
+      "name": "niah_100",
+      "category": "niah",
+      "passed": true,
+      "latency_s": 0.457,
+      "expected": "QUANTUM-DOLPHIN-42",
+      "response_preview": "The secret passphrase mentioned in the document is: **QUANTUM-DOLPHIN-42**."
+    },
+    {
+      "name": "niah_500",
+      "category": "niah",
+      "passed": true,
+      "latency_s": 0.536,
+      "expected": "QUANTUM-DOLPHIN-42",
+      "response_preview": "QUANTUM-DOLPHIN-42"
+    },
+    {
+      "name": "niah_1000",
+      "category": "niah",
+      "passed": true,
+      "latency_s": 0.707,
+      "expected": "QUANTUM-DOLPHIN-42",
+      "response_preview": "QUANTUM-DOLPHIN-42"
+    }
+  ],
+  "summary": {
+    "total": 10,
+    "passed": 9,
+    "failed": 1,
+    "pass_rate": 90.0
+  }
+}

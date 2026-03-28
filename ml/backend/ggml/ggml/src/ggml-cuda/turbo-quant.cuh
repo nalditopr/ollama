@@ -4,27 +4,15 @@
 
 /*
  * TurboQuant CUDA backend — KV cache compression
- * Based on animehacker/llama-turboquant reference implementation.
  *
- * turbo3: 3-bit PolarQuant, block_size=32, per-block WHT32, 4.6x compression
- *   - WHT rotation fused into quantize (set_rows) and vec_dot (MMVQ)
- *   - No graph-level rotation ops needed
- * turbo4: 3-bit PolarQuant + 1-bit QJL, block_size=128, 3.8x compression
+ * turbo3: Lucien2468 3-bit uniform quantization, block_size=32, 3.5 bpw
+ *   - Simple round+clamp: (val-4)*d, no codebook, no rotation, no WHT
+ *   - FA works via graph-level F32 cast before attention
+ * turbo4: 3-bit angle grid + 1-bit sign, block_size=128, 4.0625 bpw
  */
 
 #define QR_TURBO3  2   /* 2 elements per dequantize call */
 #define QK_TURBO4  128
-
-#define TURBO_QJL_CONST  1.2533141373155003f  /* sqrt(pi/2) */
-
-/* 3-bit centroids (register LUT) — scaled centroids for gamma-based dequant */
-static __device__ __forceinline__ float turbo_centroid_3bit(int idx) {
-    constexpr float c[8] = {
-        -2.1573f, -1.3336f, -0.7434f, -0.2428f,
-         0.2428f,  0.7434f,  1.3336f,  2.1573f
-    };
-    return c[idx];
-}
 
 /* ===== Declarations ===== */
 
@@ -34,22 +22,8 @@ void ggml_cuda_op_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 template<typename dst_t>
 void dequantize_row_turbo3_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream);
 
-/* No-WHT dequant: centroid*gamma only (rotated space). Used for V cache optimization. */
-template<typename dst_t>
-void dequantize_row_turbo3_0_no_wht_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream);
-
-/* Inverse WHT32 on output data (post-matmul). Tiny: only output-sized, not cache-sized. */
+/* Inverse WHT32 on output data (post-matmul). Used by TQ3_KV/TQ4_WHT types, not turbo3. */
 void turbo3_inverse_wht32_cuda(float * data, int64_t n_elements, cudaStream_t stream);
-
-/* Fused V dequant + attention matmul: reads turbo3 V directly, no intermediate F32 tensor.
- * Computes kqv = V_rot^T * attn per head, output in rotated space (apply inv WHT after). */
-void turbo3_fused_v_attn_cuda(
-        const void * v_data, const float * attn, float * output,
-        int64_t n_kv, int64_t head_dim, int64_t n_q, int64_t n_heads,
-        int64_t v_stride_row, int64_t v_stride_head,
-        int64_t attn_stride_row, int64_t attn_stride_head,
-        int64_t out_stride_head,
-        cudaStream_t stream);
 
 template<typename dst_t>
 void dequantize_row_turbo4_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream);

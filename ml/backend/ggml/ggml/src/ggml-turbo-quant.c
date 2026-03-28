@@ -1,12 +1,11 @@
 /*
- * TurboQuant: KV cache compression via PolarQuant + QJL
- * Based on: arXiv 2504.19874 (ICLR 2026)
+ * TurboQuant: KV cache compression
  *
- * Implements GGML_TYPE_TURBO3_0 (3-bit) and GGML_TYPE_TURBO4_0 (4-bit)
- * for use as --cache-type-k turbo3 --cache-type-v turbo3 in llama-server.
+ * TURBO3_0: Lucien2468 3-bit uniform quantization (3.5 bpw)
+ * TURBO4_0: 3-bit angle grid + 1-bit sign (4.0625 bpw)
+ *
+ * For use as --cache-type-k turbo3 --cache-type-v turbo3 in llama-server.
  */
-
-#define _USE_MATH_DEFINES // For M_PI on MSVC
 
 #include "ggml-quants.h"
 #include "ggml-common.h"
@@ -17,187 +16,53 @@
 #include <assert.h>
 #include <stdlib.h>
 
-/* ---------- constants ---------- */
-
-#define TURBO_SEED_ROTATION 42
-#define TURBO_SEED_QJL      1042
-#define TURBO_D             128  /* rotation group size = head_dim (independent of block size) */
-#define TURBO_QJL_CONST     1.2533141373155003f  /* sqrt(pi/2) */
-
-/* Optimal centroids from paper (scaled by 1/sqrt(d)) */
-/* 1-bit: ±sqrt(2/(pi*d)) */
-static const float CENTROIDS_1BIT[2] = { -0.070711f, 0.070711f };  /* for d=128 */
-
-/* 2-bit: {±0.453, ±1.51} / sqrt(d) */
-static const float CENTROIDS_2BIT[4] = { -0.133462f, -0.039994f, 0.039994f, 0.133462f };
-
-/* 3-bit: Lloyd-Max for N(0, 1/128), pre-computed */
-static const float CENTROIDS_3BIT[8] = {
-    -0.190685f, -0.117832f, -0.065717f, -0.021460f,
-     0.021460f,  0.065717f,  0.117832f,  0.190685f
-};
-
-/* ---------- rotation matrix (lazy init) ---------- */
-
-static float turbo_rotation[TURBO_D * TURBO_D];
-static float turbo_rotation_t[TURBO_D * TURBO_D]; /* transpose */
-static int   turbo_rotation_initialized = 0;
-
-/* Simple LCG PRNG for deterministic rotation generation */
-static uint64_t turbo_prng_state;
-
-static void turbo_prng_seed(uint64_t seed) {
-    turbo_prng_state = seed;
-}
-
-static double turbo_prng_normal(void) {
-    /* Box-Muller transform from uniform LCG */
-    turbo_prng_state = turbo_prng_state * 6364136223846793005ULL + 1442695040888963407ULL;
-    double u1 = (double)(turbo_prng_state >> 11) / (double)(1ULL << 53);
-    if (u1 < 1e-15) u1 = 1e-15;
-    turbo_prng_state = turbo_prng_state * 6364136223846793005ULL + 1442695040888963407ULL;
-    double u2 = (double)(turbo_prng_state >> 11) / (double)(1ULL << 53);
-    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
-}
-
-static void turbo_init_rotation(void) {
-    if (turbo_rotation_initialized) return;
-
-    const int d = TURBO_D;
-
-    /* Generate random Gaussian matrix */
-    turbo_prng_seed(TURBO_SEED_ROTATION);
-    float G[TURBO_D * TURBO_D];
-    for (int i = 0; i < d * d; i++) {
-        G[i] = (float)turbo_prng_normal();
-    }
-
-    /* QR decomposition via modified Gram-Schmidt */
-    /* Q stored column-major in turbo_rotation */
-    memcpy(turbo_rotation, G, d * d * sizeof(float));
-
-    for (int j = 0; j < d; j++) {
-        /* Normalize column j */
-        float norm = 0.0f;
-        for (int i = 0; i < d; i++) {
-            norm += turbo_rotation[i * d + j] * turbo_rotation[i * d + j];
-        }
-        norm = sqrtf(norm);
-        if (norm > 1e-10f) {
-            for (int i = 0; i < d; i++) {
-                turbo_rotation[i * d + j] /= norm;
-            }
-        }
-
-        /* Orthogonalize remaining columns against j */
-        for (int k = j + 1; k < d; k++) {
-            float dot = 0.0f;
-            for (int i = 0; i < d; i++) {
-                dot += turbo_rotation[i * d + j] * turbo_rotation[i * d + k];
-            }
-            for (int i = 0; i < d; i++) {
-                turbo_rotation[i * d + k] -= dot * turbo_rotation[i * d + j];
-            }
-        }
-    }
-
-    /* Compute transpose */
-    for (int i = 0; i < d; i++) {
-        for (int j = 0; j < d; j++) {
-            turbo_rotation_t[i * d + j] = turbo_rotation[j * d + i];
-        }
-    }
-
-    turbo_rotation_initialized = 1;
-}
-
-/* ---------- QJL projection matrix (lazy init, seed-based) ---------- */
-
-static float turbo_qjl_matrix[TURBO_D * TURBO_D];
-static float turbo_qjl_matrix_t[TURBO_D * TURBO_D];
-static int   turbo_qjl_initialized = 0;
-
-static void turbo_init_qjl(void) {
-    if (turbo_qjl_initialized) return;
-
-    const int d = TURBO_D;
-    turbo_prng_seed(TURBO_SEED_QJL);
-
-    for (int i = 0; i < d * d; i++) {
-        turbo_qjl_matrix[i] = (float)turbo_prng_normal();
-    }
-
-    /* Transpose */
-    for (int i = 0; i < d; i++) {
-        for (int j = 0; j < d; j++) {
-            turbo_qjl_matrix_t[i * d + j] = turbo_qjl_matrix[j * d + i];
-        }
-    }
-
-    turbo_qjl_initialized = 1;
-}
-
-/* ---------- helper: matrix-vector multiply ---------- */
-
-static void matvec(const float * M, const float * x, float * y, int d) {
-    /* y = M @ x, M is row-major d×d */
-    for (int i = 0; i < d; i++) {
-        float sum = 0.0f;
-        for (int j = 0; j < d; j++) {
-            sum += M[i * d + j] * x[j];
-        }
-        y[i] = sum;
-    }
-}
-
-/* ---------- nearest centroid ---------- */
-
-static int nearest_centroid_2bit(float val) {
-    /* Binary search on midpoints: {-0.133, -0.040, 0.040, 0.133} */
-    if (val < -0.086728f) return 0;       /* midpoint(-0.133, -0.040) */
-    if (val <  0.000000f) return 1;       /* midpoint(-0.040, 0.040) */
-    if (val <  0.086728f) return 2;       /* midpoint(0.040, 0.133) */
-    return 3;
-}
-
-static int nearest_centroid_3bit(float val) {
-    /* 8 centroids, find nearest via midpoints */
-    if (val < -0.154259f) return 0;
-    if (val < -0.091775f) return 1;
-    if (val < -0.043589f) return 2;
-    if (val <  0.000000f) return 3;
-    if (val <  0.043589f) return 4;
-    if (val <  0.091775f) return 5;
-    if (val <  0.154259f) return 6;
-    return 7;
-}
-
-/* ---------- TURBO3_0: 2-bit PolarQuant + 1-bit QJL ---------- */
+/* ---------- TURBO3_0: Lucien2468 3-bit uniform quantization ---------- */
+/* round(x / d) clamped to [-4, 3], stored as unsigned [0,7] in 3-bit packing.
+ * Dequant: (val - 4) * d, where d = amax / 4.0.
+ * No codebook, no rotation, no WHT. */
 
 void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * GGML_RESTRICT y, int64_t k) {
-    // Stub — Metal shader handles quantize on GPU. CPU path is simplified.
-    assert(k % QK_TURBO3 == 0);
-    const int nb = k / QK_TURBO3;
-    for (int i = 0; i < nb; i++) {
-        float norm = 0.0f;
-        for (int j = 0; j < QK_TURBO3; j++) norm += x[i*QK_TURBO3 + j] * x[i*QK_TURBO3 + j];
-        y[i].gamma = GGML_FP32_TO_FP16(sqrtf(norm));
-        memset(y[i].qs, 0, QK_TURBO3 / 4);
-        memset(y[i].qr, 0, QK_TURBO3 / 8);
+    assert(k % 32 == 0);
+    for (int64_t i = 0; i < k / 32; i++) {
+        float max = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            float av = fabsf(x[i * 32 + j]);
+            if (av > max) max = av;
+        }
+        float d = max / 4.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        y[i].d = GGML_FP32_TO_FP16(d);
+        for (int group = 0; group < 4; group++) {
+            int base = (int)(i * 32) + group * 8;
+            uint8_t v[8];
+            for (int j = 0; j < 8; j++) {
+                int q = (int)roundf(x[base + j] * id);
+                int c = q < -4 ? -4 : (q > 3 ? 3 : q);
+                v[j] = (uint8_t)(c + 4);
+            }
+            y[i].qs[group * 3 + 0] = (v[0] & 7) | ((v[1] & 7) << 3) | ((v[2] & 3) << 6);
+            y[i].qs[group * 3 + 1] = ((v[2] & 4) >> 2) | ((v[3] & 7) << 1) | ((v[4] & 7) << 4) | ((v[5] & 1) << 7);
+            y[i].qs[group * 3 + 2] = ((v[5] & 6) >> 1) | ((v[6] & 7) << 2) | ((v[7] & 7) << 5);
+        }
     }
 }
 
 void dequantize_row_turbo3_0(const block_turbo3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    // Stub — Metal shader handles dequant on GPU.
-    assert(k % QK_TURBO3 == 0);
-    const int nb = k / QK_TURBO3;
-    for (int block = 0; block < nb; block++) {
-        float norm = GGML_FP16_TO_FP32(x[block].gamma);
-        for (int j = 0; j < QK_TURBO3; j++) {
-            uint8_t low2 = (x[block].qs[j/4] >> ((j%4)*2)) & 0x3;
-            uint8_t hi1 = (x[block].qr[j/8] >> (j%8)) & 0x1;
-            uint8_t idx = low2 | (hi1 << 2);
-            y[block * QK_TURBO3 + j] = CENTROIDS_3BIT[idx] * norm;
+    assert(k % 32 == 0);
+    for (int64_t i = 0; i < k / 32; i++) {
+        float d = GGML_FP16_TO_FP32(x[i].d);
+        for (int group = 0; group < 4; group++) {
+            const uint8_t *qs = x[i].qs + group * 3;
+            float *out = y + i * 32 + group * 8;
+            out[0] = ((qs[0]      ) & 7) - 4.0f;
+            out[1] = ((qs[0] >> 3 ) & 7) - 4.0f;
+            out[2] = (((qs[0] >> 6) & 3) | ((qs[1] & 1) << 2)) - 4.0f;
+            out[3] = ((qs[1] >> 1 ) & 7) - 4.0f;
+            out[4] = ((qs[1] >> 4 ) & 7) - 4.0f;
+            out[5] = (((qs[1] >> 7) & 1) | ((qs[2] & 3) << 1)) - 4.0f;
+            out[6] = ((qs[2] >> 2 ) & 7) - 4.0f;
+            out[7] = ((qs[2] >> 5 ) & 7) - 4.0f;
+            for (int j = 0; j < 8; j++) out[j] *= d;
         }
     }
 }

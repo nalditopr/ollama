@@ -882,18 +882,32 @@ static __device__ __forceinline__ void dequantize_V_tq4_0_wht(const void * __res
     }
 }
 
-/* ===== TurboQuant 3-bit flash attention functions ===== */
+/* ===== TurboQuant 3-bit flash attention functions (Lucien2468 uniform quant) ===== */
+
+// Helper: unpack 3-bit value at position j from a turbo3 block's qs array
+static __device__ __forceinline__ float turbo3_dequant_elem(const block_turbo3_0 * blk, int j) {
+    const int group = j / 8;
+    const int pos = j % 8;
+    const uint8_t * qs = blk->qs + group * 3;
+    int val;
+    switch (pos) {
+        case 0: val = (qs[0]      ) & 7; break;
+        case 1: val = (qs[0] >> 3 ) & 7; break;
+        case 2: val = ((qs[0] >> 6) & 3) | ((qs[1] & 1) << 2); break;
+        case 3: val = (qs[1] >> 1 ) & 7; break;
+        case 4: val = (qs[1] >> 4 ) & 7; break;
+        case 5: val = ((qs[1] >> 7) & 1) | ((qs[2] & 3) << 1); break;
+        case 6: val = (qs[2] >> 2 ) & 7; break;
+        default: val = (qs[2] >> 5 ) & 7; break;
+    }
+    return (float)(val - 4);
+}
 
 template<int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
     GGML_UNUSED(Q_q8);
     GGML_UNUSED(Q_ds_v);
-
-    constexpr float cn[8] = {
-        -0.190685f, -0.117832f, -0.065717f, -0.021460f,
-         0.021460f,  0.065717f,  0.117832f,  0.190685f
-    };
 
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
@@ -910,16 +924,12 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0(
             const int ib = elem / QK_TURBO3;
             const int j_base = elem % QK_TURBO3;
 
-            const float norm = __half2float(K_turbo[ib].gamma);
+            const float d = __half2float(K_turbo[ib].d);
 
-            const uint8_t qb = K_turbo[ib].qs[j_base / 4];
-            const uint8_t sb = K_turbo[ib].qr[j_base / 8];
-            const int sshift = (j_base % 8);
-
-            const float v0 = cn[( qb       & 0x03) | (((sb >> (sshift    )) & 1) << 2)] * norm;
-            const float v1 = cn[((qb >> 2) & 0x03) | (((sb >> (sshift + 1)) & 1) << 2)] * norm;
-            const float v2 = cn[((qb >> 4) & 0x03) | (((sb >> (sshift + 2)) & 1) << 2)] * norm;
-            const float v3 = cn[((qb >> 6)       ) | (((sb >> (sshift + 3)) & 1) << 2)] * norm;
+            const float v0 = turbo3_dequant_elem(&K_turbo[ib], j_base    ) * d;
+            const float v1 = turbo3_dequant_elem(&K_turbo[ib], j_base + 1) * d;
+            const float v2 = turbo3_dequant_elem(&K_turbo[ib], j_base + 2) * d;
+            const float v3 = turbo3_dequant_elem(&K_turbo[ib], j_base + 3) * d;
 
 #ifdef V_DOT2_F32_F16_AVAILABLE
             const half2 qh0 = ((const half2 *) Q_v)[k_KQ_0/nthreads + k_KQ_1];
@@ -939,29 +949,20 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0(
 
 template <typename T, int ne>
 static __device__ __forceinline__ void dequantize_V_turbo3_0(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
-    constexpr float cn[8] = {
-        -0.190685f, -0.117832f, -0.065717f, -0.021460f,
-         0.021460f,  0.065717f,  0.117832f,  0.190685f
-    };
-
     const block_turbo3_0 * x = (const block_turbo3_0 *) vx;
     const int64_t ib  = i0 / QK_TURBO3;
     const int     iqs = i0 % QK_TURBO3;
-    const float norm = __half2float(x[ib].gamma);
+    const float d = __half2float(x[ib].d);
 
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same<T, half>::value) {
 #pragma unroll
         for (int l0 = 0; l0 < ne; l0 += 4) {
             const int j = iqs + l0;
-            const uint8_t qb = x[ib].qs[j / 4];
-            const uint8_t sb = x[ib].qr[j / 8];
-            const int sshift = j % 8;
-
-            const float f0 = cn[( qb       & 0x03) | (((sb >> (sshift    )) & 1) << 2)] * norm;
-            const float f1 = cn[((qb >> 2) & 0x03) | (((sb >> (sshift + 1)) & 1) << 2)] * norm;
-            const float f2 = cn[((qb >> 4) & 0x03) | (((sb >> (sshift + 2)) & 1) << 2)] * norm;
-            const float f3 = cn[((qb >> 6)       ) | (((sb >> (sshift + 3)) & 1) << 2)] * norm;
+            const float f0 = turbo3_dequant_elem(&x[ib], j    ) * d;
+            const float f1 = turbo3_dequant_elem(&x[ib], j + 1) * d;
+            const float f2 = turbo3_dequant_elem(&x[ib], j + 2) * d;
+            const float f3 = turbo3_dequant_elem(&x[ib], j + 3) * d;
 
             ((half2 *) dst)[l0/2    ] = make_half2(__float2half(f0), __float2half(f1));
             ((half2 *) dst)[l0/2 + 1] = make_half2(__float2half(f2), __float2half(f3));
@@ -972,14 +973,10 @@ static __device__ __forceinline__ void dequantize_V_turbo3_0(const void * __rest
 #pragma unroll
         for (int l0 = 0; l0 < ne; l0 += 4) {
             const int j = iqs + l0;
-            const uint8_t qb = x[ib].qs[j / 4];
-            const uint8_t sb = x[ib].qr[j / 8];
-            const int sshift = j % 8;
-
-            ((float *) dst)[l0    ] = cn[( qb       & 0x03) | (((sb >> (sshift    )) & 1) << 2)] * norm;
-            ((float *) dst)[l0 + 1] = cn[((qb >> 2) & 0x03) | (((sb >> (sshift + 1)) & 1) << 2)] * norm;
-            ((float *) dst)[l0 + 2] = cn[((qb >> 4) & 0x03) | (((sb >> (sshift + 2)) & 1) << 2)] * norm;
-            ((float *) dst)[l0 + 3] = cn[((qb >> 6)       ) | (((sb >> (sshift + 3)) & 1) << 2)] * norm;
+            ((float *) dst)[l0    ] = turbo3_dequant_elem(&x[ib], j    ) * d;
+            ((float *) dst)[l0 + 1] = turbo3_dequant_elem(&x[ib], j + 1) * d;
+            ((float *) dst)[l0 + 2] = turbo3_dequant_elem(&x[ib], j + 2) * d;
+            ((float *) dst)[l0 + 3] = turbo3_dequant_elem(&x[ib], j + 3) * d;
         }
     } else {
         static_assert(std::is_same_v<T, void>, "unsupported type");

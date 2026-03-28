@@ -90,7 +90,6 @@ typedef sycl::half2 ggml_half2;
 #define K_SCALE_SIZE 12
 #define QK_TQ3_KV 32
 #define QK_TURBO3 32
-#define QK_TURBO3_GROUP 128
 
 #if defined(GGML_COMMON_DECL_CUDA) || defined(GGML_COMMON_DECL_HIP) || defined(GGML_COMMON_DECL_SYCL)
 // QR = QK / number of values before dequantization
@@ -309,15 +308,14 @@ typedef struct {
 } block_tq3_kv;
 static_assert(sizeof(block_tq3_kv) == QK_TQ3_KV/4 + QK_TQ3_KV/8 + sizeof(ggml_half), "wrong tq3_kv block size");
 
-// TurboQuant TURBO3_0: nalditopr 3-bit KV cache (WHT rotation + symmetric centroids)
-// 32 elements per block, 14 bytes = 3.5 bpw
-// 3-bit index split: lower 2 bits in qs[], upper 1 bit in qr[]
+// TurboQuant TURBO3_0: Lucien2468 3-bit uniform quantization (3.5 bpw)
+// 32 elements per block, 14 bytes: scale + 3-bit packed values
+// Dequant: (val - 4) * d, where val is 3-bit unsigned [0,7], d = amax / 4.0
 typedef struct {
-    uint8_t    qs[QK_TURBO3 / 4];      //  8 bytes: lower 2-bit indices (4 per byte)
-    uint8_t    qr[QK_TURBO3 / 8];      //  4 bytes: upper 1-bit of 3-bit index (8 per byte)
-    ggml_half  gamma;                   //  2 bytes: scale factor (amax / 2.1573)
+    ggml_half  d;                       //  2 bytes: scale = amax / 4.0
+    uint8_t    qs[QK_TURBO3 * 3 / 8];  // 12 bytes: 3-bit packed values (8 per 3 bytes)
 } block_turbo3_0;                       // 14 bytes total
-static_assert(sizeof(block_turbo3_0) == QK_TURBO3/4 + QK_TURBO3/8 + sizeof(ggml_half), "wrong turbo3_0 block size/padding");
+static_assert(sizeof(block_turbo3_0) == sizeof(ggml_half) + QK_TURBO3 * 3 / 8, "wrong turbo3_0 block size/padding");
 
 // TurboQuant TURBO4_0: 4-bit KV cache (3-bit angle grid + 1-bit sign)
 // 256 elements per block, 130 bytes = 4.0625 bpw, 3.9x compression

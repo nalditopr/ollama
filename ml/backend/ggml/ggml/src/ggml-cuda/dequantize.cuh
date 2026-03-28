@@ -207,28 +207,31 @@ static __device__ __forceinline__ void dequantize_tq3_kv(const void * vx, const 
     v.y = d * TQ3_KV_CENTROIDS_DQ[idx1];
 }
 
-// TurboQuant TURBO3_0 dequantize (float2 interface for convert.cu template)
-static __device__ const float TURBO3_CENTROIDS_DQ[8] = {
-    -0.190685f, -0.117832f, -0.065717f, -0.021460f,
-     0.021460f,  0.065717f,  0.117832f,  0.190685f
-};
-
+// TurboQuant TURBO3_0: Lucien2468 3-bit uniform quantization
+// Dequant: (3bit_val - 4) * d, packed 8 values per 3 bytes
 static __device__ __forceinline__ void dequantize_turbo3_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
     const block_turbo3_0 * x = (const block_turbo3_0 *) vx;
-    const float d = __half2float(x[ib].gamma);
+    const float d = __half2float(x[ib].d);
 
-    const int j0 = iqs;
-    const int j1 = j0 + 1;
+    // iqs indexes pairs: 0..15 for 32 elements
+    // group_idx selects which 3-byte group (0..3), pair_idx selects which pair within group (0..3)
+    const int group_idx = iqs / 4;
+    const int pair_idx = iqs % 4;
+    const uint8_t * qs = x[ib].qs + group_idx * 3;
 
-    // Extract 3-bit indices (2-bit lo in qs + 1-bit hi in qr)
-    const uint8_t lo0 = (x[ib].qs[j0/4] >> ((j0%4)*2)) & 0x3;
-    const uint8_t hi0 = (x[ib].qr[j0/8] >> (j0%8)) & 0x1;
-    const uint8_t lo1 = (x[ib].qs[j1/4] >> ((j1%4)*2)) & 0x3;
-    const uint8_t hi1 = (x[ib].qr[j1/8] >> (j1%8)) & 0x1;
-
-    const uint8_t idx0 = lo0 | (hi0 << 2);
-    const uint8_t idx1 = lo1 | (hi1 << 2);
-
-    v.x = d * TURBO3_CENTROIDS_DQ[idx0];
-    v.y = d * TURBO3_CENTROIDS_DQ[idx1];
+    if (pair_idx == 0) {
+        v.x = (qs[0] & 7) - 4.0f;
+        v.y = ((qs[0] >> 3) & 7) - 4.0f;
+    } else if (pair_idx == 1) {
+        v.x = (((qs[0] >> 6) & 3) | ((qs[1] & 1) << 2)) - 4.0f;
+        v.y = ((qs[1] >> 1) & 7) - 4.0f;
+    } else if (pair_idx == 2) {
+        v.x = ((qs[1] >> 4) & 7) - 4.0f;
+        v.y = (((qs[1] >> 7) & 1) | ((qs[2] & 3) << 1)) - 4.0f;
+    } else {
+        v.x = ((qs[2] >> 2) & 7) - 4.0f;
+        v.y = ((qs[2] >> 5) & 7) - 4.0f;
+    }
+    v.x *= d;
+    v.y *= d;
 }
