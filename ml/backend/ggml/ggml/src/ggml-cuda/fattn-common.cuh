@@ -717,6 +717,176 @@ static __device__ __forceinline__ void dequantize_V_tq4_0(const void * __restric
     }
 }
 
+// WHT-TQ flash attention K dot products
+#include "wht.cuh"
+
+template<int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq3_0_wht(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    const block_tq3_0 * K_tq3 = (const block_tq3_0 *) K_c;
+    GGML_UNUSED(Q_v);
+
+    float sum = 0.0f;
+
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
+        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+
+        const int base_elem = k_KQ * 4;
+        const int ib = base_elem / QK_K;
+        const int jbase = base_elem % QK_K;
+
+        const float d_k = __half2float(K_tq3[ib].d);
+
+        const int u = Q_q8[k_KQ_0/nthreads];
+        const int8_t * q8 = (const int8_t *) &u;
+
+        float local_sum = 0.0f;
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const int j = jbase + l;
+            const uint8_t angle_idx = (K_tq3[ib].al[j/4] >> ((j%4)*2)) & 0x3;
+            const uint8_t sign      = (K_tq3[ib].signs[j/8] >> (j%8)) & 0x1;
+            const float k_val = WHT_CODEBOOK_4[angle_idx] * (1.0f - 2.0f * sign);
+            local_sum += k_val * (float)q8[l];
+        }
+
+        const float2 Q_ds = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads];
+        sum += d_k * local_sum * Q_ds.x;
+    }
+
+    return sum;
+}
+
+template<int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq4_0_wht(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    const block_tq4_0 * K_tq4 = (const block_tq4_0 *) K_c;
+    GGML_UNUSED(Q_v);
+
+    float sum = 0.0f;
+
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
+        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+
+        const int base_elem = k_KQ * 4;
+        const int ib = base_elem / QK_K;
+        const int jbase = base_elem % QK_K;
+
+        const float d_k = __half2float(K_tq4[ib].d);
+
+        const int u = Q_q8[k_KQ_0/nthreads];
+        const int8_t * q8 = (const int8_t *) &u;
+
+        float local_sum = 0.0f;
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const int j = jbase + l;
+            const uint8_t lo  = (K_tq4[ib].al[j/4] >> ((j%4)*2)) & 0x3;
+            const uint8_t hi  = (K_tq4[ib].ah[j/8] >> (j%8)) & 0x1;
+            const uint8_t idx = lo | (hi << 2);
+            const uint8_t sign = (K_tq4[ib].signs[j/8] >> (j%8)) & 0x1;
+            const float k_val = WHT_CODEBOOK_8[idx] * (1.0f - 2.0f * sign);
+            local_sum += k_val * (float)q8[l];
+        }
+
+        const float2 Q_ds = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads];
+        sum += d_k * local_sum * Q_ds.x;
+    }
+
+    return sum;
+}
+
+// WHT-TQ V dequantization for flash attention
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_tq3_0_wht(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_tq3_0 * x = (const block_tq3_0 *) vx;
+
+    const int64_t ib  = i0 / QK_K;
+    const int     idq = i0 % QK_K;
+
+    const float d = __half2float(x[ib].d);
+
+    static_assert(ne == 2 || ne == 4, "bad ne");
+
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, half>) {
+#pragma unroll
+        for (int l0 = 0; l0 < ne; l0 += 2) {
+            const int j0 = idq + l0;
+            const int j1 = idq + l0 + 1;
+            const uint8_t a0 = (x[ib].al[j0/4] >> ((j0%4)*2)) & 0x3;
+            const uint8_t a1 = (x[ib].al[j1/4] >> ((j1%4)*2)) & 0x3;
+            const uint8_t s0 = (x[ib].signs[j0/8] >> (j0%8)) & 0x1;
+            const uint8_t s1 = (x[ib].signs[j1/8] >> (j1%8)) & 0x1;
+            const float v0 = d * WHT_CODEBOOK_4[a0] * (1.0f - 2.0f * s0);
+            const float v1 = d * WHT_CODEBOOK_4[a1] * (1.0f - 2.0f * s1);
+            ((half2 *) dst)[l0/2] = make_half2(v0, v1);
+        }
+    } else
+#endif // FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, float>) {
+#pragma unroll
+        for (int l = 0; l < ne; ++l) {
+            const int j = idq + l;
+            const uint8_t a = (x[ib].al[j/4] >> ((j%4)*2)) & 0x3;
+            const uint8_t s = (x[ib].signs[j/8] >> (j%8)) & 0x1;
+            ((float *) dst)[l] = d * WHT_CODEBOOK_4[a] * (1.0f - 2.0f * s);
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_tq4_0_wht(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_tq4_0 * x = (const block_tq4_0 *) vx;
+
+    const int64_t ib  = i0 / QK_K;
+    const int     idq = i0 % QK_K;
+
+    const float d = __half2float(x[ib].d);
+
+    static_assert(ne == 2 || ne == 4, "bad ne");
+
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, half>) {
+#pragma unroll
+        for (int l0 = 0; l0 < ne; l0 += 2) {
+            const int j0 = idq + l0;
+            const int j1 = idq + l0 + 1;
+            const uint8_t lo0 = (x[ib].al[j0/4] >> ((j0%4)*2)) & 0x3;
+            const uint8_t hi0 = (x[ib].ah[j0/8] >> (j0%8)) & 0x1;
+            const uint8_t lo1 = (x[ib].al[j1/4] >> ((j1%4)*2)) & 0x3;
+            const uint8_t hi1 = (x[ib].ah[j1/8] >> (j1%8)) & 0x1;
+            const uint8_t idx0 = lo0 | (hi0 << 2);
+            const uint8_t idx1 = lo1 | (hi1 << 2);
+            const uint8_t s0 = (x[ib].signs[j0/8] >> (j0%8)) & 0x1;
+            const uint8_t s1 = (x[ib].signs[j1/8] >> (j1%8)) & 0x1;
+            const float v0 = d * WHT_CODEBOOK_8[idx0] * (1.0f - 2.0f * s0);
+            const float v1 = d * WHT_CODEBOOK_8[idx1] * (1.0f - 2.0f * s1);
+            ((half2 *) dst)[l0/2] = make_half2(v0, v1);
+        }
+    } else
+#endif // FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, float>) {
+#pragma unroll
+        for (int l = 0; l < ne; ++l) {
+            const int j = idq + l;
+            const uint8_t lo = (x[ib].al[j/4] >> ((j%4)*2)) & 0x3;
+            const uint8_t hi = (x[ib].ah[j/8] >> (j%8)) & 0x1;
+            const uint8_t idx = lo | (hi << 2);
+            const uint8_t s = (x[ib].signs[j/8] >> (j%8)) & 0x1;
+            ((float *) dst)[l] = d * WHT_CODEBOOK_8[idx] * (1.0f - 2.0f * s);
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -735,6 +905,10 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_tq3_0<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_TQ4_0) {
         return vec_dot_fattn_vec_KQ_tq4_0<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQ3_0_WHT) {
+        return vec_dot_fattn_vec_KQ_tq3_0_wht<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQ4_0_WHT) {
+        return vec_dot_fattn_vec_KQ_tq4_0_wht<D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
@@ -759,6 +933,10 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_tq3_0<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_TQ4_0) {
         return dequantize_V_tq4_0<T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TQ3_0_WHT) {
+        return dequantize_V_tq3_0_wht<T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TQ4_0_WHT) {
+        return dequantize_V_tq4_0_wht<T, ne>;
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;

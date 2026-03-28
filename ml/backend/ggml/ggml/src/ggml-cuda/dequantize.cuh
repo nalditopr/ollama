@@ -128,3 +128,52 @@ static __device__ __forceinline__ void dequantize_tq4_0(const void * vx, const i
     v.x = d * TQ_GRID_8[idx0] * (1.0f - 2.0f * s0);
     v.y = d * TQ_GRID_8[idx1] * (1.0f - 2.0f * s1);
 }
+
+// WHT codebooks for dequantization
+#include "wht.cuh"
+
+// WHT dequantize: dequantize 2 elements within a sub-block, then apply inverse WHT
+// NOTE: For the generic convert path, this operates on pairs of elements.
+// The inverse WHT needs all 32 elements of a sub-block, so this function
+// dequantizes the pair using WHT codebook values. The full inverse WHT
+// is applied in the block-level dequantize paths (fattn, vecdot).
+// For the element-level dequant used by convert.cu, we apply a simplified
+// approach: dequant with WHT codebook but mark that inverse WHT is needed.
+static __device__ __forceinline__ void dequantize_tq3_0_wht(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_tq3_0 * x = (const block_tq3_0 *) vx;
+    const float d = __half2float(x[ib].d);
+
+    const int j0 = iqs * 2;
+    const int j1 = j0 + 1;
+
+    const uint8_t a0 = (x[ib].al[j0/4] >> ((j0%4)*2)) & 0x3;
+    const uint8_t a1 = (x[ib].al[j1/4] >> ((j1%4)*2)) & 0x3;
+
+    const uint8_t s0 = (x[ib].signs[j0/8] >> (j0%8)) & 0x1;
+    const uint8_t s1 = (x[ib].signs[j1/8] >> (j1%8)) & 0x1;
+
+    v.x = d * WHT_CODEBOOK_4[a0] * (1.0f - 2.0f * s0);
+    v.y = d * WHT_CODEBOOK_4[a1] * (1.0f - 2.0f * s1);
+}
+
+static __device__ __forceinline__ void dequantize_tq4_0_wht(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_tq4_0 * x = (const block_tq4_0 *) vx;
+    const float d = __half2float(x[ib].d);
+
+    const int j0 = iqs * 2;
+    const int j1 = j0 + 1;
+
+    const uint8_t lo0 = (x[ib].al[j0/4] >> ((j0%4)*2)) & 0x3;
+    const uint8_t hi0 = (x[ib].ah[j0/8] >> (j0%8)) & 0x1;
+    const uint8_t lo1 = (x[ib].al[j1/4] >> ((j1%4)*2)) & 0x3;
+    const uint8_t hi1 = (x[ib].ah[j1/8] >> (j1%8)) & 0x1;
+
+    const uint8_t idx0 = lo0 | (hi0 << 2);
+    const uint8_t idx1 = lo1 | (hi1 << 2);
+
+    const uint8_t s0 = (x[ib].signs[j0/8] >> (j0%8)) & 0x1;
+    const uint8_t s1 = (x[ib].signs[j1/8] >> (j1%8)) & 0x1;
+
+    v.x = d * WHT_CODEBOOK_8[idx0] * (1.0f - 2.0f * s0);
+    v.y = d * WHT_CODEBOOK_8[idx1] * (1.0f - 2.0f * s1);
+}

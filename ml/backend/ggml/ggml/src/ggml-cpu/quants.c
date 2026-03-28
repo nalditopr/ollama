@@ -510,6 +510,167 @@ void ggml_vec_dot_tq4_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const vo
     ggml_vec_dot_tq4_0_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
 }
 
+// ====================== WHT TurboQuant CPU functions ======================
+
+#define WHT_SEED_D_CPU_Q       0x9E3779B9u
+#define WHT_SEED_D_PRIME_CPU_Q 0xDEADBEEFu
+
+static uint32_t cpu_q_wang_hash(uint32_t seed) {
+    seed = (seed ^ 61u) ^ (seed >> 16u);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4u);
+    seed *= 0x27d4eb2du;
+    seed = seed ^ (seed >> 15u);
+    return seed;
+}
+
+static void cpu_q_wht_inverse_32(float data[32]) {
+    for (int stride = 16; stride >= 1; stride >>= 1) {
+        for (int i = 0; i < 32; i++) {
+            if ((i & stride) == 0) {
+                float a = data[i];
+                float b = data[i | stride];
+                data[i]          = a + b;
+                data[i | stride] = a - b;
+            }
+        }
+    }
+    const float norm = 0.17677669529663689f;
+    for (int i = 0; i < 32; i++) data[i] *= norm;
+}
+
+static const float wht_cpu_codebook_4[4] = {
+    0.1450f, 0.4528f, 0.7913f, 1.2771f
+};
+
+static const float wht_cpu_codebook_8[8] = {
+    0.0737f, 0.2225f, 0.3740f, 0.5322f,
+    0.7025f, 0.8941f, 1.1249f, 1.4709f
+};
+
+void quantize_row_tq3_0_wht(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    assert(k % QK_K == 0);
+    block_tq3_0 * GGML_RESTRICT y = vy;
+    quantize_row_tq3_0_wht_ref(x, y, k);
+}
+
+void quantize_row_tq4_0_wht(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    assert(k % QK_K == 0);
+    block_tq4_0 * GGML_RESTRICT y = vy;
+    quantize_row_tq4_0_wht_ref(x, y, k);
+}
+
+void ggml_vec_dot_tq3_0_wht_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_tq3_0 * GGML_RESTRICT x = vx;
+    const block_q8_K  * GGML_RESTRICT y = vy;
+
+    const int nb = n / QK_K;
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d);
+
+        // Dequantize the WHT-domain values
+        float tmp[QK_K];
+        for (int j = 0; j < QK_K; j++) {
+            uint8_t angle_idx = (x[i].al[j / 4] >> ((j % 4) * 2)) & 0x3;
+            uint8_t sign      = (x[i].signs[j / 8] >> (j % 8)) & 0x1;
+            float grid_val    = wht_cpu_codebook_4[angle_idx];
+            tmp[j]            = grid_val * (1.0f - 2.0f * sign);
+        }
+
+        // Inverse WHT rotation on each sub-block of 32
+        for (int sb = 0; sb < 8; sb++) {
+            uint32_t signs_d = cpu_q_wang_hash(WHT_SEED_D_CPU_Q ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_d >> j) & 1u) tmp[sb*32 + j] = -tmp[sb*32 + j];
+            }
+
+            cpu_q_wht_inverse_32(tmp + sb*32);
+
+            uint32_t signs_dp = cpu_q_wang_hash(WHT_SEED_D_PRIME_CPU_Q ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_dp >> j) & 1u) tmp[sb*32 + j] = -tmp[sb*32 + j];
+            }
+        }
+
+        // Dot product with Q8_K values
+        float sumi = 0.0f;
+        for (int j = 0; j < QK_K; j++) {
+            sumi += tmp[j] * y[i].qs[j];
+        }
+
+        sumf += sumi * d;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_tq4_0_wht_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_tq4_0 * GGML_RESTRICT x = vx;
+    const block_q8_K  * GGML_RESTRICT y = vy;
+
+    const int nb = n / QK_K;
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d);
+
+        float tmp[QK_K];
+        for (int j = 0; j < QK_K; j++) {
+            uint8_t lo        = (x[i].al[j / 4] >> ((j % 4) * 2)) & 0x3;
+            uint8_t hi        = (x[i].ah[j / 8] >> (j % 8)) & 0x1;
+            uint8_t angle_idx = lo | (hi << 2);
+            uint8_t sign      = (x[i].signs[j / 8] >> (j % 8)) & 0x1;
+            float grid_val    = wht_cpu_codebook_8[angle_idx];
+            tmp[j]            = grid_val * (1.0f - 2.0f * sign);
+        }
+
+        for (int sb = 0; sb < 8; sb++) {
+            uint32_t signs_d = cpu_q_wang_hash(WHT_SEED_D_CPU_Q ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_d >> j) & 1u) tmp[sb*32 + j] = -tmp[sb*32 + j];
+            }
+
+            cpu_q_wht_inverse_32(tmp + sb*32);
+
+            uint32_t signs_dp = cpu_q_wang_hash(WHT_SEED_D_PRIME_CPU_Q ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_dp >> j) & 1u) tmp[sb*32 + j] = -tmp[sb*32 + j];
+            }
+        }
+
+        float sumi = 0.0f;
+        for (int j = 0; j < QK_K; j++) {
+            sumi += tmp[j] * y[i].qs[j];
+        }
+
+        sumf += sumi * d;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_tq3_0_wht_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_tq3_0_wht_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
+}
+
+void ggml_vec_dot_tq4_0_wht_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_tq4_0_wht_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
+}
+
 void ggml_vec_dot_q2_K_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     assert(nrc == 1);
     UNUSED(nrc);

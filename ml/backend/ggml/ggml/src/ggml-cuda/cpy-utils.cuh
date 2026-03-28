@@ -186,6 +186,94 @@ static __device__ void quantize_f32_iq4_nl_block(const float * __restrict__ x, b
     y->d = sumq2 > 0 ? sumqx/sumq2 : d;
 }
 
+// WHT-TQ quantization functions
+#include "wht.cuh"
+
+static __device__ void quantize_f32_tq3_0_wht_block(const float * __restrict__ x, block_tq3_0 * __restrict__ y) {
+    float rotated[256];
+
+    // Copy and apply WHT rotation to each sub-block of 32
+    for (int sb = 0; sb < 8; sb++) {
+        for (int j = 0; j < 32; j++) rotated[sb*32+j] = x[sb*32+j];
+        wht_rotate_forward_32(rotated + sb*32, WHT_SEED_D, WHT_SEED_D_PRIME, sb);
+    }
+
+    // Find amax of rotated data
+    float amax = 0.0f;
+    for (int j = 0; j < 256; j++) {
+        float ax = fabsf(rotated[j]);
+        if (ax > amax) amax = ax;
+    }
+    y->d = __float2half(amax);
+    float inv_d = amax > 0.0f ? 1.0f / amax : 0.0f;
+
+    // Clear arrays
+    memset(y->al, 0, sizeof(y->al));
+    memset(y->signs, 0, sizeof(y->signs));
+
+    // Quantize each element to nearest WHT codebook entry
+    for (int j = 0; j < 256; j++) {
+        float normalized = rotated[j] * inv_d;
+        float abs_norm = fabsf(normalized);
+        int sign = (normalized < 0.0f) ? 1 : 0;
+
+        // Find nearest codebook entry (4 entries for TQ3)
+        int best = 0;
+        float best_err = 1e30f;
+        for (int g = 0; g < 4; g++) {
+            float err = (abs_norm - WHT_CODEBOOK_4[g]) * (abs_norm - WHT_CODEBOOK_4[g]);
+            if (err < best_err) { best_err = err; best = g; }
+        }
+
+        y->al[j/4] |= (uint8_t)((best & 0x3) << ((j%4)*2));
+        if (sign) y->signs[j/8] |= (uint8_t)(1 << (j%8));
+    }
+}
+
+static __device__ void quantize_f32_tq4_0_wht_block(const float * __restrict__ x, block_tq4_0 * __restrict__ y) {
+    float rotated[256];
+
+    // Copy and apply WHT rotation to each sub-block of 32
+    for (int sb = 0; sb < 8; sb++) {
+        for (int j = 0; j < 32; j++) rotated[sb*32+j] = x[sb*32+j];
+        wht_rotate_forward_32(rotated + sb*32, WHT_SEED_D, WHT_SEED_D_PRIME, sb);
+    }
+
+    // Find amax of rotated data
+    float amax = 0.0f;
+    for (int j = 0; j < 256; j++) {
+        float ax = fabsf(rotated[j]);
+        if (ax > amax) amax = ax;
+    }
+    y->d = __float2half(amax);
+    float inv_d = amax > 0.0f ? 1.0f / amax : 0.0f;
+
+    // Clear arrays
+    memset(y->al, 0, sizeof(y->al));
+    memset(y->ah, 0, sizeof(y->ah));
+    memset(y->signs, 0, sizeof(y->signs));
+
+    // Quantize each element to nearest WHT codebook entry
+    for (int j = 0; j < 256; j++) {
+        float normalized = rotated[j] * inv_d;
+        float abs_norm = fabsf(normalized);
+        int sign = (normalized < 0.0f) ? 1 : 0;
+
+        // Find nearest codebook entry (8 entries for TQ4)
+        int best = 0;
+        float best_err = 1e30f;
+        for (int g = 0; g < 8; g++) {
+            float err = (abs_norm - WHT_CODEBOOK_8[g]) * (abs_norm - WHT_CODEBOOK_8[g]);
+            if (err < best_err) { best_err = err; best = g; }
+        }
+
+        // 3-bit index split: 2-bit lo in al, 1-bit hi in ah
+        y->al[j/4] |= (uint8_t)((best & 0x3) << ((j%4)*2));
+        if (best & 0x4) y->ah[j/8] |= (uint8_t)(1 << (j%8));
+        if (sign) y->signs[j/8] |= (uint8_t)(1 << (j%8));
+    }
+}
+
 // Wrapper functions for cpy.cu compatibility
 static __device__ void cpy_blck_f32_q4_0(const char * cxi, char * cdsti) {
     quantize_f32_q4_0_block((const float *)cxi, (block_q4_0 *)cdsti);

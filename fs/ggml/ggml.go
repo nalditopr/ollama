@@ -500,6 +500,10 @@ func (t TensorType) TypeSize() uint64 {
 		return 2 + blockSize/4 + blockSize/8 // d + al + signs = 2 + 64 + 32 = 98
 	case TensorTypeTQ4_0:
 		return 2 + blockSize/4 + blockSize/8 + blockSize/8 // d + al + ah + signs = 2 + 64 + 32 + 32 = 130
+	case TensorTypeTQ3_0_WHT:
+		return 2 + blockSize/4 + blockSize/8 // same block layout as TQ3_0 = 98
+	case TensorTypeTQ4_0_WHT:
+		return 2 + blockSize/4 + blockSize/8 + blockSize/8 // same block layout as TQ4_0 = 130
 	default:
 		return 0
 	}
@@ -855,7 +859,7 @@ func (f GGML) SupportsKVCacheType(cacheType string) bool {
 		return true
 	}
 
-	return slices.Contains([]string{"q8_0", "q4_0"}, cacheType)
+	return slices.Contains([]string{"q8_0", "q4_0", "tq3", "tq4"}, cacheType)
 }
 
 // KVCacheTypeIsQuantized checks if the requested cache type is a quantized type
@@ -915,6 +919,10 @@ func kvCacheBytesPerElement(cacheType string) float64 {
 		return 1 // 1/2 of fp16
 	case "q4_0":
 		return 0.5 // 1/4 of fp16
+	case "tq3":
+		return 98.0 / 256.0 // 3.0625 bpw = ~0.383 bytes/element
+	case "tq4":
+		return 130.0 / 256.0 // 4.0625 bpw = ~0.508 bytes/element
 	case "f32":
 		return 4 // f32 (default for recurrent)
 	default:

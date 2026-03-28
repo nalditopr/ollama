@@ -2443,6 +2443,289 @@ size_t quantize_tq4_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
     return nrows * row_size;
 }
 
+// ====================== WHT TurboQuant (de)-quantization ======================
+
+// Fixed seeds for the D @ H @ D' rotation structure
+#define WHT_SEED_D_CPU       0x9E3779B9u
+#define WHT_SEED_D_PRIME_CPU 0xDEADBEEFu
+
+// Wang hash for deterministic PRNG (CPU version)
+static uint32_t cpu_wang_hash(uint32_t seed) {
+    seed = (seed ^ 61u) ^ (seed >> 16u);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4u);
+    seed *= 0x27d4eb2du;
+    seed = seed ^ (seed >> 15u);
+    return seed;
+}
+
+// In-place forward WHT-32 on data[0..31], normalized by 1/sqrt(32)
+static void cpu_wht_forward_32(float data[32]) {
+    for (int stride = 16; stride >= 1; stride >>= 1) {
+        for (int i = 0; i < 32; i++) {
+            if ((i & stride) == 0) {
+                float a = data[i];
+                float b = data[i | stride];
+                data[i]          = a + b;
+                data[i | stride] = a - b;
+            }
+        }
+    }
+    const float norm = 0.17677669529663689f; // 1/sqrt(32)
+    for (int i = 0; i < 32; i++) data[i] *= norm;
+}
+
+// In-place inverse WHT-32 (self-inverse up to scaling)
+static void cpu_wht_inverse_32(float data[32]) {
+    for (int stride = 16; stride >= 1; stride >>= 1) {
+        for (int i = 0; i < 32; i++) {
+            if ((i & stride) == 0) {
+                float a = data[i];
+                float b = data[i | stride];
+                data[i]          = a + b;
+                data[i | stride] = a - b;
+            }
+        }
+    }
+    const float norm = 0.17677669529663689f;
+    for (int i = 0; i < 32; i++) data[i] *= norm;
+}
+
+// Lloyd-optimal codebook for half-normal |N(0,1)| distribution
+// 4-level (TQ3: 2-bit index + 1-bit sign = 3 bits)
+static const float WHT_CODEBOOK_4_CPU[4] = {
+    0.1450f, 0.4528f, 0.7913f, 1.2771f
+};
+
+// 8-level (TQ4: 3-bit index + 1-bit sign = 4 bits)
+static const float WHT_CODEBOOK_8_CPU[8] = {
+    0.0737f, 0.2225f, 0.3740f, 0.5322f,
+    0.7025f, 0.8941f, 1.1249f, 1.4709f
+};
+
+void quantize_row_tq3_0_wht_ref(const float * GGML_RESTRICT x, block_tq3_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * QK_K;
+        float rotated[QK_K];
+
+        // Apply WHT rotation to each sub-block of 32
+        for (int sb = 0; sb < 8; sb++) {
+            // Copy sub-block
+            for (int j = 0; j < 32; j++) rotated[sb*32 + j] = xb[sb*32 + j];
+
+            // Apply D' signs
+            uint32_t signs_dp = cpu_wang_hash(WHT_SEED_D_PRIME_CPU ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_dp >> j) & 1u) rotated[sb*32 + j] = -rotated[sb*32 + j];
+            }
+
+            // WHT forward (butterfly)
+            cpu_wht_forward_32(rotated + sb*32);
+
+            // Apply D signs
+            uint32_t signs_d = cpu_wang_hash(WHT_SEED_D_CPU ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_d >> j) & 1u) rotated[sb*32 + j] = -rotated[sb*32 + j];
+            }
+        }
+
+        // Compute block absolute max
+        float amax = 0.0f;
+        for (int j = 0; j < QK_K; j++) {
+            float ax = fabsf(rotated[j]);
+            if (ax > amax) amax = ax;
+        }
+        y[i].d = GGML_FP32_TO_FP16(amax);
+        float inv_d = amax > 0.0f ? 1.0f / amax : 0.0f;
+
+        memset(y[i].al, 0, sizeof(y[i].al));
+        memset(y[i].signs, 0, sizeof(y[i].signs));
+
+        for (int j = 0; j < QK_K; j++) {
+            float normalized = rotated[j] * inv_d;
+            float abs_norm = fabsf(normalized);
+            int sign = (normalized < 0.0f) ? 1 : 0;
+
+            // Find nearest codebook entry
+            int best_idx = 0;
+            float best_err = 1e30f;
+            for (int g = 0; g < 4; g++) {
+                float err = (abs_norm - WHT_CODEBOOK_4_CPU[g]) * (abs_norm - WHT_CODEBOOK_4_CPU[g]);
+                if (err < best_err) { best_err = err; best_idx = g; }
+            }
+
+            // Pack 2-bit angle
+            y[i].al[j/4] |= (uint8_t)((best_idx & 0x3) << ((j%4)*2));
+
+            // Pack 1-bit sign
+            if (sign) {
+                y[i].signs[j/8] |= (uint8_t)(1 << (j%8));
+            }
+        }
+    }
+}
+
+void quantize_row_tq4_0_wht_ref(const float * GGML_RESTRICT x, block_tq4_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * QK_K;
+        float rotated[QK_K];
+
+        // Apply WHT rotation to each sub-block of 32
+        for (int sb = 0; sb < 8; sb++) {
+            for (int j = 0; j < 32; j++) rotated[sb*32 + j] = xb[sb*32 + j];
+
+            uint32_t signs_dp = cpu_wang_hash(WHT_SEED_D_PRIME_CPU ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_dp >> j) & 1u) rotated[sb*32 + j] = -rotated[sb*32 + j];
+            }
+
+            cpu_wht_forward_32(rotated + sb*32);
+
+            uint32_t signs_d = cpu_wang_hash(WHT_SEED_D_CPU ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_d >> j) & 1u) rotated[sb*32 + j] = -rotated[sb*32 + j];
+            }
+        }
+
+        float amax = 0.0f;
+        for (int j = 0; j < QK_K; j++) {
+            float ax = fabsf(rotated[j]);
+            if (ax > amax) amax = ax;
+        }
+        y[i].d = GGML_FP32_TO_FP16(amax);
+        float inv_d = amax > 0.0f ? 1.0f / amax : 0.0f;
+
+        memset(y[i].al, 0, sizeof(y[i].al));
+        memset(y[i].ah, 0, sizeof(y[i].ah));
+        memset(y[i].signs, 0, sizeof(y[i].signs));
+
+        for (int j = 0; j < QK_K; j++) {
+            float normalized = rotated[j] * inv_d;
+            float abs_norm = fabsf(normalized);
+            int sign = (normalized < 0.0f) ? 1 : 0;
+
+            int best_idx = 0;
+            float best_err = 1e30f;
+            for (int g = 0; g < 8; g++) {
+                float err = (abs_norm - WHT_CODEBOOK_8_CPU[g]) * (abs_norm - WHT_CODEBOOK_8_CPU[g]);
+                if (err < best_err) { best_err = err; best_idx = g; }
+            }
+
+            // Pack 2-bit angle (low)
+            y[i].al[j/4] |= (uint8_t)((best_idx & 0x3) << ((j%4)*2));
+
+            // Pack 1-bit angle (high)
+            if (best_idx & 0x4) {
+                y[i].ah[j/8] |= (uint8_t)(1 << (j%8));
+            }
+
+            // Pack 1-bit sign
+            if (sign) {
+                y[i].signs[j/8] |= (uint8_t)(1 << (j%8));
+            }
+        }
+    }
+}
+
+void dequantize_row_tq3_0_wht(const block_tq3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+
+        // Step 1: Standard grid lookup to get the WHT-domain values
+        float tmp[QK_K];
+        for (int j = 0; j < QK_K; j++) {
+            uint8_t angle_idx = (x[i].al[j / 4] >> ((j % 4) * 2)) & 0x3;
+            uint8_t sign      = (x[i].signs[j / 8] >> (j % 8)) & 0x1;
+            float grid_val    = WHT_CODEBOOK_4_CPU[angle_idx];
+            tmp[j]            = d * grid_val * (1.0f - 2.0f * sign);
+        }
+
+        // Step 2: Inverse WHT rotation on each sub-block of 32
+        for (int sb = 0; sb < 8; sb++) {
+            // Inverse rotation: D @ H @ D' (reverse order)
+            uint32_t signs_d = cpu_wang_hash(WHT_SEED_D_CPU ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_d >> j) & 1u) tmp[sb*32 + j] = -tmp[sb*32 + j];
+            }
+
+            cpu_wht_inverse_32(tmp + sb*32);
+
+            uint32_t signs_dp = cpu_wang_hash(WHT_SEED_D_PRIME_CPU ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_dp >> j) & 1u) tmp[sb*32 + j] = -tmp[sb*32 + j];
+            }
+        }
+
+        for (int j = 0; j < QK_K; j++) {
+            y[i * QK_K + j] = tmp[j];
+        }
+    }
+}
+
+void dequantize_row_tq4_0_wht(const block_tq4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+
+        float tmp[QK_K];
+        for (int j = 0; j < QK_K; j++) {
+            uint8_t lo        = (x[i].al[j / 4] >> ((j % 4) * 2)) & 0x3;
+            uint8_t hi        = (x[i].ah[j / 8] >> (j % 8)) & 0x1;
+            uint8_t angle_idx = lo | (hi << 2);
+            uint8_t sign      = (x[i].signs[j / 8] >> (j % 8)) & 0x1;
+            float grid_val    = WHT_CODEBOOK_8_CPU[angle_idx];
+            tmp[j]            = d * grid_val * (1.0f - 2.0f * sign);
+        }
+
+        for (int sb = 0; sb < 8; sb++) {
+            uint32_t signs_d = cpu_wang_hash(WHT_SEED_D_CPU ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_d >> j) & 1u) tmp[sb*32 + j] = -tmp[sb*32 + j];
+            }
+
+            cpu_wht_inverse_32(tmp + sb*32);
+
+            uint32_t signs_dp = cpu_wang_hash(WHT_SEED_D_PRIME_CPU ^ (uint32_t)(i * 8 + sb));
+            for (int j = 0; j < 32; j++) {
+                if ((signs_dp >> j) & 1u) tmp[sb*32 + j] = -tmp[sb*32 + j];
+            }
+        }
+
+        for (int j = 0; j < QK_K; j++) {
+            y[i * QK_K + j] = tmp[j];
+        }
+    }
+}
+
+size_t quantize_tq3_0_wht(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    GGML_UNUSED(imatrix);
+    size_t row_size = (size_t)(n_per_row / QK_K) * sizeof(block_tq3_0);
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_tq3_0_wht_ref(src + row * n_per_row, (block_tq3_0 *)((char *)dst + row * row_size), n_per_row);
+    }
+    return nrows * row_size;
+}
+
+size_t quantize_tq4_0_wht(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    GGML_UNUSED(imatrix);
+    size_t row_size = (size_t)(n_per_row / QK_K) * sizeof(block_tq4_0);
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_tq4_0_wht_ref(src + row * n_per_row, (block_tq4_0 *)((char *)dst + row * row_size), n_per_row);
+    }
+    return nrows * row_size;
+}
+
 // ====================== "True" 2-bit (de)-quantization
 
 void dequantize_row_iq2_xxs(const block_iq2_xxs * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {

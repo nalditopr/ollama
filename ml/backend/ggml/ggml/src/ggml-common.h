@@ -165,6 +165,12 @@ typedef sycl::half2 ggml_half2;
 #define QI_TQ4_0 (QK_K / (4*QR_TQ4_0))
 #define QR_TQ4_0 2
 
+#define QI_TQ3_0_WHT (QK_K / (4*QR_TQ3_0_WHT))
+#define QR_TQ3_0_WHT 4
+
+#define QI_TQ4_0_WHT (QK_K / (4*QR_TQ4_0_WHT))
+#define QR_TQ4_0_WHT 2
+
 #endif // GGML_COMMON_DECL_CUDA || GGML_COMMON_DECL_HIP
 
 #ifdef _MSC_VER

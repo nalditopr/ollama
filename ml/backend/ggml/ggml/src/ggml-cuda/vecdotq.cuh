@@ -1288,6 +1288,67 @@ static __device__ __forceinline__ float vec_dot_tq4_0_q8_1(
         sum += d * dequant * bq8_1[ib8].qs[jj];
     }
 
-    const int ib8 = (base) / QK8_1;
-    return sum * __low2float(bq8_1[ib8].ds);
+    const int ib8_tq4 = (base) / QK8_1;
+    return sum * __low2float(bq8_1[ib8_tq4].ds);
+}
+
+// WHT codebooks for vec_dot
+#include "wht.cuh"
+
+#define VDR_TQ3_0_WHT_Q8_1_MMVQ 1
+#define VDR_TQ3_0_WHT_Q8_1_MMQ  1
+
+static __device__ __forceinline__ float vec_dot_tq3_0_wht_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_tq3_0 * bq3 = (const block_tq3_0 *) vbq + kbx;
+    const float d = __half2float(bq3->d);
+
+    float sum = 0.0f;
+    const int base = iqs * QR_TQ3_0_WHT;
+
+#pragma unroll
+    for (int l = 0; l < QR_TQ3_0_WHT; ++l) {
+        const int j = base + l;
+        const uint8_t angle_idx = (bq3->al[j/4] >> ((j%4)*2)) & 0x3;
+        const uint8_t sign      = (bq3->signs[j/8] >> (j%8)) & 0x1;
+        const float dequant     = WHT_CODEBOOK_4[angle_idx] * (1.0f - 2.0f * sign);
+
+        const int ib8 = j / QK8_1;
+        const int jj  = j % QK8_1;
+        sum += d * dequant * bq8_1[ib8].qs[jj];
+    }
+
+    const int ib8_wht3 = (base) / QK8_1;
+    return sum * __low2float(bq8_1[ib8_wht3].ds);
+}
+
+#define VDR_TQ4_0_WHT_Q8_1_MMVQ 1
+#define VDR_TQ4_0_WHT_Q8_1_MMQ  1
+
+static __device__ __forceinline__ float vec_dot_tq4_0_wht_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_tq4_0 * bq4 = (const block_tq4_0 *) vbq + kbx;
+    const float d = __half2float(bq4->d);
+
+    float sum = 0.0f;
+    const int base = iqs * QR_TQ4_0_WHT;
+
+#pragma unroll
+    for (int l = 0; l < QR_TQ4_0_WHT; ++l) {
+        const int j = base + l;
+        const uint8_t lo  = (bq4->al[j/4] >> ((j%4)*2)) & 0x3;
+        const uint8_t hi  = (bq4->ah[j/8] >> (j%8)) & 0x1;
+        const uint8_t idx = lo | (hi << 2);
+        const uint8_t sign = (bq4->signs[j/8] >> (j%8)) & 0x1;
+        const float dequant = WHT_CODEBOOK_8[idx] * (1.0f - 2.0f * sign);
+
+        const int ib8 = j / QK8_1;
+        const int jj  = j % QK8_1;
+        sum += d * dequant * bq8_1[ib8].qs[jj];
+    }
+
+    const int ib8_wht4 = (base) / QK8_1;
+    return sum * __low2float(bq8_1[ib8_wht4].ds);
 }

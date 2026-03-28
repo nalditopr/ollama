@@ -960,6 +960,20 @@ struct ggml_cuda_type_traits<GGML_TYPE_TQ4_0> {
     static constexpr int qi = QI_TQ4_0;
 };
 
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQ3_0_WHT> {
+    static constexpr int qk = QK_K;
+    static constexpr int qr = QR_TQ3_0_WHT;
+    static constexpr int qi = QI_TQ3_0_WHT;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQ4_0_WHT> {
+    static constexpr int qk = QK_K;
+    static constexpr int qr = QR_TQ4_0_WHT;
+    static constexpr int qi = QI_TQ4_0_WHT;
+};
+
 //////////////////////
 
 struct ggml_cuda_device_info {

@@ -1105,6 +1105,10 @@ func (t *Tensor) DType() ml.DType {
 		return ml.DTypeI32
 	case C.GGML_TYPE_MXFP4:
 		return ml.DTypeMXFP4
+	case C.GGML_TYPE_TQ3_0_WHT:
+		return ml.DTypeTQ3WHT
+	case C.GGML_TYPE_TQ4_0_WHT:
+		return ml.DTypeTQ4WHT
 	default:
 		return ml.DTypeOther
 	}
@@ -1124,6 +1128,10 @@ func ggmlDType(dtype ml.DType) uint32 {
 		return C.GGML_TYPE_I32
 	case ml.DTypeMXFP4:
 		return C.GGML_TYPE_MXFP4
+	case ml.DTypeTQ3WHT:
+		return C.GGML_TYPE_TQ3_0_WHT
+	case ml.DTypeTQ4WHT:
+		return C.GGML_TYPE_TQ4_0_WHT
 	default:
 		panic("unsupported dtype")
 	}
