@@ -1,0 +1,42 @@
+# Dockerfile.turboquant — CUDA 12 + CPU build (no ROCm, Vulkan, Jetpack, MLX)
+# Multi-stage build: devel image for compilation, runtime image for deployment
+
+# Stage 1: Build
+FROM nvidia/cuda:12.8.0-devel-ubuntu22.04 AS builder
+
+# Install Go
+ARG GO_VERSION=1.26.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget cmake git gcc g++ ca-certificates && \
+    wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz && \
+    rm go${GO_VERSION}.linux-amd64.tar.gz && \
+    rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+WORKDIR /build
+COPY . .
+
+# Build C/CUDA backend
+RUN cmake -B build -DGGML_CUDA=ON && \
+    cmake --build build --config Release -j$(nproc)
+
+# Build Go binary
+ENV CGO_ENABLED=1
+RUN go build -o ollama .
+
+# Stage 2: Runtime
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+
+# The nvidia/cuda:12.8.0-runtime image includes libcudart, libcublas, etc.
+# No additional CUDA library installation needed.
+
+COPY --from=builder /build/ollama /usr/local/bin/ollama
+COPY --from=builder /build/build/lib/ollama/ /usr/local/lib/ollama/
+
+ENV OLLAMA_HOST=0.0.0.0:11434
+ENV LD_LIBRARY_PATH=/usr/local/lib/ollama:${LD_LIBRARY_PATH}
+
+EXPOSE 11434
+ENTRYPOINT ["ollama"]
+CMD ["serve"]

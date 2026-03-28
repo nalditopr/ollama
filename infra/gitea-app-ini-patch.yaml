@@ -1,0 +1,4 @@
+# Patch for Gitea app.ini to enable Actions
+# Add to [actions] section:
+#   ENABLED = true
+#   DEFAULT_ACTIONS_URL = https://github.com

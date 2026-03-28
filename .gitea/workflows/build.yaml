@@ -1,0 +1,51 @@
+name: Build TurboQuant Docker Image
+
+on:
+  push:
+    branches:
+      - turboquant-support
+
+env:
+  REGISTRY: gitea.bb.rctechpr.net
+  IMAGE_NAME: localadmin/ollama-turboquant
+
+jobs:
+  build:
+    runs-on: ubuntu-latest  # Will run on the act_runner
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set build metadata
+        id: meta
+        run: |
+          VERSION=$(grep 'var Version' version/version.go | head -1 | grep -oP '"[^"]*"' | tr -d '"' || echo "0.0.0")
+          BUILD_NUM=${{ github.run_number }}
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=${VERSION}-tq${BUILD_NUM}" >> $GITHUB_OUTPUT
+          echo "sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Login to Gitea Registry
+        run: |
+          echo "localadmin" | docker login ${{ env.REGISTRY }} -u localadmin --password-stdin
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f Dockerfile.turboquant \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            .
+
+      - name: Push to registry
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Summary
+        run: |
+          echo "### Docker Image Built" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag: \`${{ steps.meta.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Registry: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY

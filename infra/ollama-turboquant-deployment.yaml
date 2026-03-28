@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama-turboquant
+  namespace: ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama-turboquant
+  template:
+    metadata:
+      labels:
+        app: ollama-turboquant
+    spec:
+      containers:
+        - name: ollama
+          image: gitea.bb.rctechpr.net/localadmin/ollama-turboquant:latest
+          ports:
+            - containerPort: 11434
+          env:
+            - name: OLLAMA_KV_CACHE_TYPE
+              value: "turbo3"
+            - name: OLLAMA_FLASH_ATTENTION
+              value: "true"
+            - name: OLLAMA_MODELS
+              value: "/models"
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ollama-models-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama-turboquant
+  namespace: ai
+spec:
+  selector:
+    app: ollama-turboquant
+  ports:
+    - port: 11434
+      targetPort: 11434
+  type: ClusterIP
