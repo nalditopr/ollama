@@ -182,7 +182,7 @@ static __device__ __forceinline__ void dequantize_tq4_0_wht(const void * vx, con
 // NOTE: This dequantizes in WHT-rotated space (no inverse WHT).
 // For the convert path, this produces centroid-scaled values.
 // The vec_dot path handles the WHT rotation on the Q side.
-static __constant__ const float TQ3_KV_CENTROIDS_DQ[8] = {
+static __device__ const float TQ3_KV_CENTROIDS_DQ[8] = {
     -2.1573f, -1.3336f, -0.7434f, -0.2428f,
      0.2428f,  0.7434f,  1.3336f,  2.1573f
 };
@@ -208,7 +208,7 @@ static __device__ __forceinline__ void dequantize_tq3_kv(const void * vx, const 
 }
 
 // TurboQuant TURBO3_0 dequantize (float2 interface for convert.cu template)
-static __constant__ const float TURBO3_CENTROIDS_DQ[8] = {
+static __device__ const float TURBO3_CENTROIDS_DQ[8] = {
     -0.190685f, -0.117832f, -0.065717f, -0.021460f,
      0.021460f,  0.065717f,  0.117832f,  0.190685f
 };

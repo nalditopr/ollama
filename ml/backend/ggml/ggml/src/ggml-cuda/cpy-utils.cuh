@@ -275,12 +275,12 @@ static __device__ void quantize_f32_tq4_0_wht_block(const float * __restrict__ x
 }
 
 // TQ3_KV: animehacker 3-bit KV cache quantize
-static __constant__ const float TQ3_KV_CENTROIDS_D[8] = {
+static __device__ const float TQ3_KV_CENTROIDS_D[8] = {
     -2.1573f, -1.3336f, -0.7434f, -0.2428f,
      0.2428f,  0.7434f,  1.3336f,  2.1573f
 };
 
-static __constant__ const int8_t TQ3_KV_SIGNS_D[32] = {
+static __device__ const int8_t TQ3_KV_SIGNS_D[32] = {
     +1,-1,+1,+1,-1,-1,+1,-1,+1,+1,-1,+1,-1,+1,-1,-1,
     +1,-1,-1,+1,+1,-1,+1,-1,-1,+1,+1,+1,-1,-1,+1,-1
 };

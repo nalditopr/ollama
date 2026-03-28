@@ -1366,12 +1366,14 @@ static __device__ __forceinline__ float vec_dot_tq4_0_wht_q8_1(
 #define VDR_TQ3_KV_Q8_1_MMVQ 1
 #define VDR_TQ3_KV_Q8_1_MMQ  1
 
-static __constant__ const float TQ3_KV_CENTROIDS_VD[8] = {
+// Use local arrays (not __constant__) to avoid multi-CU constant memory collisions
+// that cause corruption on smaller GPUs like A2000
+static __device__ const float TQ3_KV_CENTROIDS_VD[8] = {
     -2.1573f, -1.3336f, -0.7434f, -0.2428f,
      0.2428f,  0.7434f,  1.3336f,  2.1573f
 };
 
-static __constant__ const int8_t TQ3_KV_SIGNS_VD[32] = {
+static __device__ const int8_t TQ3_KV_SIGNS_VD[32] = {
     +1,-1,+1,+1,-1,-1,+1,-1,+1,+1,-1,+1,-1,+1,-1,-1,
     +1,-1,-1,+1,+1,-1,+1,-1,-1,+1,+1,+1,-1,-1,+1,-1
 };
