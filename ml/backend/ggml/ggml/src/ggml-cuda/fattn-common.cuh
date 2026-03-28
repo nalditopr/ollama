@@ -724,36 +724,36 @@ template<int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq3_0_wht(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
 
+    // WHT-TQ K dot product: dequantize sub-blocks of 32, apply inverse WHT, then dot with Q.
+    // The inverse WHT is CRITICAL — without it, values are in rotated coordinate space.
     const block_tq3_0 * K_tq3 = (const block_tq3_0 *) K_c;
-    GGML_UNUSED(Q_v);
+    const float * Q_f = (const float *) Q_v;
 
     float sum = 0.0f;
 
-#pragma unroll
-    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
-        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
-
-        const int base_elem = k_KQ * 4;
-        const int ib = base_elem / QK_K;
-        const int jbase = base_elem % QK_K;
-
+    // Process D elements in sub-blocks of 32 (WHT operates on 32 elements)
+    for (int sb_start = 0; sb_start < D; sb_start += 32) {
+        const int ib = sb_start / QK_K;
+        const int sb_offset = sb_start % QK_K;
+        const int sb_idx = sb_offset / 32;
         const float d_k = __half2float(K_tq3[ib].d);
 
-        const int u = Q_q8[k_KQ_0/nthreads];
-        const int8_t * q8 = (const int8_t *) &u;
-
-        float local_sum = 0.0f;
-#pragma unroll
-        for (int l = 0; l < 4; ++l) {
-            const int j = jbase + l;
-            const uint8_t angle_idx = (K_tq3[ib].al[j/4] >> ((j%4)*2)) & 0x3;
-            const uint8_t sign      = (K_tq3[ib].signs[j/8] >> (j%8)) & 0x1;
-            const float k_val = WHT_CODEBOOK_4[angle_idx] * (1.0f - 2.0f * sign);
-            local_sum += k_val * (float)q8[l];
+        // Dequantize 32 elements from codebook
+        float k_sub[32];
+        for (int j = 0; j < 32; j++) {
+            const int elem = sb_offset + j;
+            const uint8_t angle_idx = (K_tq3[ib].al[elem/4] >> ((elem%4)*2)) & 0x3;
+            const uint8_t sign_bit  = (K_tq3[ib].signs[elem/8] >> (elem%8)) & 0x1;
+            k_sub[j] = d_k * WHT_CODEBOOK_4[angle_idx] * (1.0f - 2.0f * sign_bit);
         }
 
-        const float2 Q_ds = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads];
-        sum += d_k * local_sum * Q_ds.x;
+        // Apply inverse WHT rotation to get back to original coordinate space
+        wht_rotate_inverse_32(k_sub, WHT_SEED_D, WHT_SEED_D_PRIME, (int)(ib * 8 + sb_idx));
+
+        // Dot product with Q (using float Q values for this thread's portion)
+        for (int j = (int)(threadIdx.x % nthreads); j < 32; j += nthreads) {
+            sum += k_sub[j] * Q_f[sb_start + j];
+        }
     }
 
     return sum;
@@ -764,37 +764,31 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq4_0_wht(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
 
     const block_tq4_0 * K_tq4 = (const block_tq4_0 *) K_c;
-    GGML_UNUSED(Q_v);
+    const float * Q_f = (const float *) Q_v;
 
     float sum = 0.0f;
 
-#pragma unroll
-    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
-        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
-
-        const int base_elem = k_KQ * 4;
-        const int ib = base_elem / QK_K;
-        const int jbase = base_elem % QK_K;
-
+    for (int sb_start = 0; sb_start < D; sb_start += 32) {
+        const int ib = sb_start / QK_K;
+        const int sb_offset = sb_start % QK_K;
+        const int sb_idx = sb_offset / 32;
         const float d_k = __half2float(K_tq4[ib].d);
 
-        const int u = Q_q8[k_KQ_0/nthreads];
-        const int8_t * q8 = (const int8_t *) &u;
-
-        float local_sum = 0.0f;
-#pragma unroll
-        for (int l = 0; l < 4; ++l) {
-            const int j = jbase + l;
-            const uint8_t lo  = (K_tq4[ib].al[j/4] >> ((j%4)*2)) & 0x3;
-            const uint8_t hi  = (K_tq4[ib].ah[j/8] >> (j%8)) & 0x1;
+        float k_sub[32];
+        for (int j = 0; j < 32; j++) {
+            const int elem = sb_offset + j;
+            const uint8_t lo  = (K_tq4[ib].al[elem/4] >> ((elem%4)*2)) & 0x3;
+            const uint8_t hi  = (K_tq4[ib].ah[elem/8] >> (elem%8)) & 0x1;
             const uint8_t idx = lo | (hi << 2);
-            const uint8_t sign = (K_tq4[ib].signs[j/8] >> (j%8)) & 0x1;
-            const float k_val = WHT_CODEBOOK_8[idx] * (1.0f - 2.0f * sign);
-            local_sum += k_val * (float)q8[l];
+            const uint8_t sign_bit = (K_tq4[ib].signs[elem/8] >> (elem%8)) & 0x1;
+            k_sub[j] = d_k * WHT_CODEBOOK_8[idx] * (1.0f - 2.0f * sign_bit);
         }
 
-        const float2 Q_ds = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads];
-        sum += d_k * local_sum * Q_ds.x;
+        wht_rotate_inverse_32(k_sub, WHT_SEED_D, WHT_SEED_D_PRIME, (int)(ib * 8 + sb_idx));
+
+        for (int j = (int)(threadIdx.x % nthreads); j < 32; j += nthreads) {
+            sum += k_sub[j] * Q_f[sb_start + j];
+        }
     }
 
     return sum;

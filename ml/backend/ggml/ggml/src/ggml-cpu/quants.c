@@ -671,6 +671,80 @@ void ggml_vec_dot_tq4_0_wht_q8_K(int n, float * GGML_RESTRICT s, size_t bs, cons
     ggml_vec_dot_tq4_0_wht_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
 }
 
+// TQ3_KV: animehacker 3-bit KV cache
+void quantize_row_tq3_kv(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    assert(k % QK_TQ3_KV == 0);
+    block_tq3_kv * GGML_RESTRICT y = vy;
+    quantize_row_tq3_kv_ref(x, y, k);
+}
+
+static const float tq3_kv_centroids_cpu[8] = {
+    -2.1573f, -1.3336f, -0.7434f, -0.2428f,
+     0.2428f,  0.7434f,  1.3336f,  2.1573f
+};
+
+static const int8_t tq3_kv_signs_cpu[32] = {
+    +1,-1,+1,+1,-1,-1,+1,-1,+1,+1,-1,+1,-1,+1,-1,-1,
+    +1,-1,-1,+1,+1,-1,+1,-1,-1,+1,+1,+1,-1,-1,+1,-1
+};
+
+static void tq3_kv_wht32_apply_cpu(int32_t data[32]) {
+    // 5-stage int32 butterfly WHT
+    for (int step = 1; step < 32; step <<= 1) {
+        for (int i = 0; i < 32; i += step * 2) {
+            for (int j = i; j < i + step; j++) {
+                int32_t a = data[j], b = data[j + step];
+                data[j] = a + b; data[j + step] = a - b;
+            }
+        }
+    }
+}
+
+void ggml_vec_dot_tq3_kv_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    // TQ3_KV uses QK=32 blocks with Q8_0 (also QK=32)
+    const block_tq3_kv * GGML_RESTRICT x = vx;
+    const block_q8_0   * GGML_RESTRICT y = vy;
+
+    const int nb = n / QK_TQ3_KV;
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d_kv = GGML_CPU_FP16_TO_FP32(x[i].gamma);
+        const float d_q8 = GGML_CPU_FP16_TO_FP32(y[i].d);
+
+        // Load 32 Q8_0 int8 values, apply diagonal signs, then butterfly WHT
+        int32_t q[32];
+        for (int j = 0; j < 32; j++) {
+            q[j] = (int32_t)y[i].qs[j] * tq3_kv_signs_cpu[j];
+        }
+        tq3_kv_wht32_apply_cpu(q);
+
+        // Dot product with centroid-dequantized K values
+        float sumi = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            int lo = (x[i].qs[j/4] >> (2*(j%4))) & 3;
+            int hi = (x[i].qr[j/8] >> (j%8)) & 1;
+            int idx = lo | (hi << 2);
+            sumi += (float)q[j] * tq3_kv_centroids_cpu[idx];
+        }
+
+        // Scale: d_kv * d_q8 * (1/sqrt(32))
+        sumf += d_kv * d_q8 * 0.17677669529663688f * sumi;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_tq3_kv_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_tq3_kv_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
+}
+
 void ggml_vec_dot_q2_K_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     assert(nrc == 1);
     UNUSED(nrc);

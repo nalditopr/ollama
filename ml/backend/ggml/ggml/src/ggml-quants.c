@@ -2726,6 +2726,111 @@ size_t quantize_tq4_0_wht(const float * GGML_RESTRICT src, void * GGML_RESTRICT 
     return nrows * row_size;
 }
 
+// ====================== TQ3_KV: animehacker 3-bit KV cache (WHT + symmetric centroids)
+
+static const float TQ3_KV_CENTROIDS[8] = {
+    -2.1573f, -1.3336f, -0.7434f, -0.2428f,
+     0.2428f,  0.7434f,  1.3336f,  2.1573f
+};
+
+static void tq3_wht32_forward_cpu(float data[32]) {
+    // Apply diagonal signs
+    static const int8_t signs[32] = {
+        +1,-1,+1,+1,-1,-1,+1,-1,+1,+1,-1,+1,-1,+1,-1,-1,
+        +1,-1,-1,+1,+1,-1,+1,-1,-1,+1,+1,+1,-1,-1,+1,-1
+    };
+    for (int j = 0; j < 32; j++) data[j] *= signs[j];
+    // 5-stage butterfly
+    for (int step = 1; step < 32; step <<= 1) {
+        for (int i = 0; i < 32; i += step * 2) {
+            for (int j = i; j < i + step; j++) {
+                float a = data[j], b = data[j + step];
+                data[j] = a + b; data[j + step] = a - b;
+            }
+        }
+    }
+    // Normalize: 1/sqrt(32) = 0.17677669529663688
+    for (int j = 0; j < 32; j++) data[j] *= 0.17677669529663688f;
+}
+
+static void tq3_wht32_inverse_cpu(float data[32]) {
+    // Inverse WHT: same butterfly, same signs, same normalization (WHT is its own inverse up to scale)
+    // Normalize first
+    for (int j = 0; j < 32; j++) data[j] *= 0.17677669529663688f;
+    // 5-stage butterfly (same as forward)
+    for (int step = 1; step < 32; step <<= 1) {
+        for (int i = 0; i < 32; i += step * 2) {
+            for (int j = i; j < i + step; j++) {
+                float a = data[j], b = data[j + step];
+                data[j] = a + b; data[j + step] = a - b;
+            }
+        }
+    }
+    // Apply diagonal signs (same signs, since sign^-1 = sign for +/-1)
+    static const int8_t signs[32] = {
+        +1,-1,+1,+1,-1,-1,+1,-1,+1,+1,-1,+1,-1,+1,-1,-1,
+        +1,-1,-1,+1,+1,-1,+1,-1,-1,+1,+1,+1,-1,-1,+1,-1
+    };
+    for (int j = 0; j < 32; j++) data[j] *= signs[j];
+}
+
+void quantize_row_tq3_kv_ref(const float * GGML_RESTRICT x, block_tq3_kv * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TQ3_KV == 0);
+    for (int64_t i = 0; i < k / QK_TQ3_KV; i++) {
+        float rotated[32];
+        for (int j = 0; j < 32; j++) rotated[j] = x[i*32+j];
+        tq3_wht32_forward_cpu(rotated);
+
+        memset(&y[i], 0, sizeof(block_tq3_kv));
+        float amax = 0.0f;
+        for (int j = 0; j < 32; j++) { float a = fabsf(rotated[j]); if (a > amax) amax = a; }
+
+        float d = amax / 2.1573f;
+        float id = d > 0.0f ? 1.0f / d : 0.0f;
+        y[i].gamma = GGML_FP32_TO_FP16(d);
+
+        for (int j = 0; j < 32; j++) {
+            float xn = rotated[j] * id;
+            int idx;
+            if      (xn < -1.7455f) idx = 0;
+            else if (xn < -1.0385f) idx = 1;
+            else if (xn < -0.4931f) idx = 2;
+            else if (xn <  0.0f)    idx = 3;
+            else if (xn <  0.4931f) idx = 4;
+            else if (xn <  1.0385f) idx = 5;
+            else if (xn <  1.7455f) idx = 6;
+            else                    idx = 7;
+            y[i].qs[j/4] |= ((idx & 3) << (2*(j%4)));
+            y[i].qr[j/8] |= (((idx >> 2) & 1) << (j%8));
+        }
+    }
+}
+
+void dequantize_row_tq3_kv(const block_tq3_kv * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TQ3_KV == 0);
+    for (int64_t i = 0; i < k / QK_TQ3_KV; i++) {
+        float d = GGML_FP16_TO_FP32(x[i].gamma);
+        float tmp[32];
+        for (int j = 0; j < 32; j++) {
+            int lo = (x[i].qs[j/4] >> (2*(j%4))) & 3;
+            int hi = (x[i].qr[j/8] >> (j%8)) & 1;
+            tmp[j] = d * TQ3_KV_CENTROIDS[lo | (hi << 2)];
+        }
+        // Inverse WHT to get back to original space
+        tq3_wht32_inverse_cpu(tmp);
+        for (int j = 0; j < 32; j++) y[i*32+j] = tmp[j];
+    }
+}
+
+size_t quantize_tq3_kv(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    GGML_UNUSED(imatrix);
+    size_t row_size = (size_t)(n_per_row / QK_TQ3_KV) * sizeof(block_tq3_kv);
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_tq3_kv_ref(src + row * n_per_row, (block_tq3_kv *)((char *)dst + row * row_size), n_per_row);
+    }
+    return nrows * row_size;
+}
+
 // ====================== "True" 2-bit (de)-quantization
 
 void dequantize_row_iq2_xxs(const block_iq2_xxs * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {

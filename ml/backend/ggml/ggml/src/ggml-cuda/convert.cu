@@ -3,6 +3,59 @@
 
 #include <cstdint>
 
+// Custom TQ3_KV dequantize kernel with cooperative inverse WHT
+// Ported from animehacker/llama-turboquant. Each block of 32 threads
+// cooperatively performs the inverse WHT butterfly in shared memory.
+template<typename dst_t>
+static __global__ void dequantize_block_tq3_kv(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    __constant__ static const float centroids[8] = {
+        -2.1573f, -1.3336f, -0.7434f, -0.2428f,
+         0.2428f,  0.7434f,  1.3336f,  2.1573f
+    };
+    static const int8_t signs[32] = {
+        +1,-1,+1,+1,-1,-1,+1,-1,+1,+1,-1,+1,-1,+1,-1,-1,
+        +1,-1,-1,+1,+1,-1,+1,-1,-1,+1,+1,+1,-1,-1,+1,-1
+    };
+
+    const int64_t i = blockIdx.x;
+    const block_tq3_kv * x = (const block_tq3_kv *)vx;
+    const int tid = threadIdx.x;
+    if (tid >= 32) return;
+
+    const float d = __half2float(x[i].gamma);
+
+    // Dequantize: 3-bit index from qs (2-bit lo) + qr (1-bit hi)
+    const int lo = (x[i].qs[tid / 4] >> (2 * (tid % 4))) & 3;
+    const int hi = (x[i].qr[tid / 8] >> (tid % 8)) & 1;
+    const int idx = lo | (hi << 2);
+
+    __shared__ float shmem[32];
+    shmem[tid] = d * centroids[idx];
+    __syncthreads();
+
+    // Cooperative inverse WHT: 5 butterfly stages
+    for (int step = 1; step < 32; step <<= 1) {
+        int partner = tid ^ step;
+        float a = shmem[tid];
+        float b = shmem[partner];
+        __syncthreads();
+        if (tid < partner) {
+            shmem[tid]     = a + b;
+            shmem[partner] = a - b;
+        }
+        __syncthreads();
+    }
+
+    // Normalize and undo sign flips
+    yy[i * QK_TQ3_KV + tid] = (dst_t)(shmem[tid] * 0.17677669529663688f * signs[tid]);
+}
+
+template<typename dst_t>
+static void dequantize_row_tq3_kv_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = k / QK_TQ3_KV;
+    dequantize_block_tq3_kv<<<nb, 32, 0, stream>>>(vx, y);
+}
+
 #define CUDA_Q8_0_NE_ALIGN 2048
 
 template <int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
@@ -709,6 +762,8 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_block_cont_cuda<QK_K, QR_TQ3_0_WHT, dequantize_tq3_0_wht>;
         case GGML_TYPE_TQ4_0_WHT:
             return dequantize_block_cont_cuda<QK_K, QR_TQ4_0_WHT, dequantize_tq4_0_wht>;
+        case GGML_TYPE_TQ3_KV:
+            return dequantize_row_tq3_kv_cuda;
         case GGML_TYPE_F32:
             return convert_unary_cont_cuda<float>;
         case GGML_TYPE_BF16:
@@ -768,6 +823,8 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return dequantize_block_cont_cuda<QK_K, QR_TQ3_0_WHT, dequantize_tq3_0_wht>;
         case GGML_TYPE_TQ4_0_WHT:
             return dequantize_block_cont_cuda<QK_K, QR_TQ4_0_WHT, dequantize_tq4_0_wht>;
+        case GGML_TYPE_TQ3_KV:
+            return dequantize_row_tq3_kv_cuda;
         case GGML_TYPE_F16:
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_BF16:
@@ -793,6 +850,8 @@ to_fp16_nc_cuda_t ggml_get_to_fp16_nc_cuda(ggml_type type) {
             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
         case GGML_TYPE_BF16:
             return convert_unary_cuda<nv_bfloat16>;
+        case GGML_TYPE_TQ3_KV:
+            return dequantize_block_cuda<QK_TQ3_KV, QR_TQ3_KV, dequantize_tq3_kv>;
         default:
             return nullptr;
     }
@@ -835,6 +894,8 @@ to_fp32_nc_cuda_t ggml_get_to_fp32_nc_cuda(ggml_type type) {
             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
         case GGML_TYPE_BF16:
             return convert_unary_cuda<nv_bfloat16, float>;
+        case GGML_TYPE_TQ3_KV:
+            return dequantize_block_cuda<QK_TQ3_KV, QR_TQ3_KV, dequantize_tq3_kv>;
         default:
             return nullptr;
     }

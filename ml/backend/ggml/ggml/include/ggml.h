@@ -426,7 +426,8 @@ extern "C" {
         GGML_TYPE_TQ4_0   = 41, // TurboQuant 4-bit (PolarQuant + QJL)
         GGML_TYPE_TQ3_0_WHT = 42, // TurboQuant 3-bit with WHT rotation
         GGML_TYPE_TQ4_0_WHT = 43, // TurboQuant 4-bit with WHT rotation
-        GGML_TYPE_COUNT   = 44,
+        GGML_TYPE_TQ3_KV    = 44, // TurboQuant 3-bit KV cache (animehacker WHT + symmetric centroids)
+        GGML_TYPE_COUNT   = 45,
     };
 
     // precision

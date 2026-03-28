@@ -177,3 +177,32 @@ static __device__ __forceinline__ void dequantize_tq4_0_wht(const void * vx, con
     v.x = d * WHT_CODEBOOK_8[idx0] * (1.0f - 2.0f * s0);
     v.y = d * WHT_CODEBOOK_8[idx1] * (1.0f - 2.0f * s1);
 }
+
+// TQ3_KV dequantize: element-pair dequant for convert.cu
+// NOTE: This dequantizes in WHT-rotated space (no inverse WHT).
+// For the convert path, this produces centroid-scaled values.
+// The vec_dot path handles the WHT rotation on the Q side.
+static __constant__ const float TQ3_KV_CENTROIDS_DQ[8] = {
+    -2.1573f, -1.3336f, -0.7434f, -0.2428f,
+     0.2428f,  0.7434f,  1.3336f,  2.1573f
+};
+
+static __device__ __forceinline__ void dequantize_tq3_kv(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_tq3_kv * x = (const block_tq3_kv *) vx;
+    const float d = __half2float(x[ib].gamma);
+
+    const int j0 = iqs;
+    const int j1 = j0 + 1;
+
+    // Extract 3-bit indices (2-bit lo in qs + 1-bit hi in qr)
+    const uint8_t lo0 = (x[ib].qs[j0/4] >> ((j0%4)*2)) & 0x3;
+    const uint8_t hi0 = (x[ib].qr[j0/8] >> (j0%8)) & 0x1;
+    const uint8_t lo1 = (x[ib].qs[j1/4] >> ((j1%4)*2)) & 0x3;
+    const uint8_t hi1 = (x[ib].qr[j1/8] >> (j1%8)) & 0x1;
+
+    const uint8_t idx0 = lo0 | (hi0 << 2);
+    const uint8_t idx1 = lo1 | (hi1 << 2);
+
+    v.x = d * TQ3_KV_CENTROIDS_DQ[idx0];
+    v.y = d * TQ3_KV_CENTROIDS_DQ[idx1];
+}

@@ -33,6 +33,7 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) 
         case GGML_TYPE_TQ4_0:       return vec_dot_tq4_0_q8_1;
         case GGML_TYPE_TQ3_0_WHT:   return vec_dot_tq3_0_wht_q8_1;
         case GGML_TYPE_TQ4_0_WHT:   return vec_dot_tq4_0_wht_q8_1;
+        case GGML_TYPE_TQ3_KV:      return vec_dot_tq3_kv_q8_1;
         default:                    return nullptr;
     }
 }
@@ -61,6 +62,7 @@ static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
         case GGML_TYPE_TQ4_0:       return VDR_TQ4_0_Q8_1_MMVQ;
         case GGML_TYPE_TQ3_0_WHT:   return VDR_TQ3_0_WHT_Q8_1_MMVQ;
         case GGML_TYPE_TQ4_0_WHT:   return VDR_TQ4_0_WHT_Q8_1_MMVQ;
+        case GGML_TYPE_TQ3_KV:      return VDR_TQ3_KV_Q8_1_MMVQ;
         default:                    return 1;
     }
 }
@@ -664,6 +666,12 @@ static void mul_mat_vec_q_switch_type(
             break;
         case GGML_TYPE_TQ4_0_WHT:
             mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_TQ4_0_WHT>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, stream);
+            break;
+        case GGML_TYPE_TQ3_KV:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_TQ3_KV>
                 (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
                  nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
                  nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, stream);

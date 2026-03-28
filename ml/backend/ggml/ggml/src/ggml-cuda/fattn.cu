@@ -210,6 +210,8 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ4_0, GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0_WHT, GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ4_0_WHT, GGML_TYPE_F16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0_WHT, GGML_TYPE_TQ3_0_WHT)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ4_0_WHT, GGML_TYPE_TQ4_0_WHT)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
     GGML_ABORT("fatal error");
@@ -277,7 +279,8 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     if (K->type != V->type) {
         // TQ types always use F16 V, allow this mismatch
         if (!(K->type == GGML_TYPE_TQ3_0 || K->type == GGML_TYPE_TQ4_0 ||
-              K->type == GGML_TYPE_TQ3_0_WHT || K->type == GGML_TYPE_TQ4_0_WHT)) {
+              K->type == GGML_TYPE_TQ3_0_WHT || K->type == GGML_TYPE_TQ4_0_WHT ||
+              K->type == GGML_TYPE_TQ3_KV)) {
             return BEST_FATTN_KERNEL_NONE;
         }
     }
@@ -298,9 +301,13 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             break;
         case GGML_TYPE_TQ3_0:
         case GGML_TYPE_TQ4_0:
+            break;
         case GGML_TYPE_TQ3_0_WHT:
         case GGML_TYPE_TQ4_0_WHT:
-            break;
+        case GGML_TYPE_TQ3_KV:
+            // WHT types disable flash attention — use MMVQ with fused Q rotation instead.
+            // Following animehacker/llama-turboquant approach: <2% speed difference.
+            return BEST_FATTN_KERNEL_NONE;
         default:
             return BEST_FATTN_KERNEL_NONE;
     }

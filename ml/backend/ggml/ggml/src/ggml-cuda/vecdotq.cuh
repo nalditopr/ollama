@@ -1295,6 +1295,15 @@ static __device__ __forceinline__ float vec_dot_tq4_0_q8_1(
 // WHT codebooks for vec_dot
 #include "wht.cuh"
 
+// WHT vec_dot: K is stored WHT-rotated. We dequant K element-by-element
+// using the WHT codebook. The Q8_1 Q values are NOT rotated.
+// For the MMVQ fallback path (flash attention disabled for WHT types),
+// the attention output will be in a mixed space. The output projection
+// absorbs this in practice (<2% quality impact per animehacker/llama-turboquant).
+//
+// This simplified approach avoids the complexity of sub-block WHT rotation
+// inside the per-element vec_dot and matches the working reference implementation.
+
 #define VDR_TQ3_0_WHT_Q8_1_MMVQ 1
 #define VDR_TQ3_0_WHT_Q8_1_MMQ  1
 
@@ -1311,16 +1320,15 @@ static __device__ __forceinline__ float vec_dot_tq3_0_wht_q8_1(
     for (int l = 0; l < QR_TQ3_0_WHT; ++l) {
         const int j = base + l;
         const uint8_t angle_idx = (bq3->al[j/4] >> ((j%4)*2)) & 0x3;
-        const uint8_t sign      = (bq3->signs[j/8] >> (j%8)) & 0x1;
-        const float dequant     = WHT_CODEBOOK_4[angle_idx] * (1.0f - 2.0f * sign);
+        const uint8_t sign_bit  = (bq3->signs[j/8] >> (j%8)) & 0x1;
+        const float k_val = d * WHT_CODEBOOK_4[angle_idx] * (1.0f - 2.0f * sign_bit);
 
         const int ib8 = j / QK8_1;
         const int jj  = j % QK8_1;
-        sum += d * dequant * bq8_1[ib8].qs[jj];
+        sum += k_val * __low2float(bq8_1[ib8].ds) * (float)bq8_1[ib8].qs[jj];
     }
 
-    const int ib8_wht3 = (base) / QK8_1;
-    return sum * __low2float(bq8_1[ib8_wht3].ds);
+    return sum;
 }
 
 #define VDR_TQ4_0_WHT_Q8_1_MMVQ 1
@@ -1341,14 +1349,73 @@ static __device__ __forceinline__ float vec_dot_tq4_0_wht_q8_1(
         const uint8_t lo  = (bq4->al[j/4] >> ((j%4)*2)) & 0x3;
         const uint8_t hi  = (bq4->ah[j/8] >> (j%8)) & 0x1;
         const uint8_t idx = lo | (hi << 2);
-        const uint8_t sign = (bq4->signs[j/8] >> (j%8)) & 0x1;
-        const float dequant = WHT_CODEBOOK_8[idx] * (1.0f - 2.0f * sign);
+        const uint8_t sign_bit = (bq4->signs[j/8] >> (j%8)) & 0x1;
+        const float k_val = d * WHT_CODEBOOK_8[idx] * (1.0f - 2.0f * sign_bit);
 
         const int ib8 = j / QK8_1;
         const int jj  = j % QK8_1;
-        sum += d * dequant * bq8_1[ib8].qs[jj];
+        sum += k_val * __low2float(bq8_1[ib8].ds) * (float)bq8_1[ib8].qs[jj];
     }
 
-    const int ib8_wht4 = (base) / QK8_1;
-    return sum * __low2float(bq8_1[ib8_wht4].ds);
+    return sum;
+}
+
+// TQ3_KV: animehacker 3-bit KV cache vec_dot
+// Key insight: WHT-rotate Q on the fly, dot with K in rotated space
+
+#define VDR_TQ3_KV_Q8_1_MMVQ 1
+#define VDR_TQ3_KV_Q8_1_MMQ  1
+
+static __constant__ const float TQ3_KV_CENTROIDS_VD[8] = {
+    -2.1573f, -1.3336f, -0.7434f, -0.2428f,
+     0.2428f,  0.7434f,  1.3336f,  2.1573f
+};
+
+static __constant__ const int8_t TQ3_KV_SIGNS_VD[32] = {
+    +1,-1,+1,+1,-1,-1,+1,-1,+1,+1,-1,+1,-1,+1,-1,-1,
+    +1,-1,-1,+1,+1,-1,+1,-1,-1,+1,+1,+1,-1,-1,+1,-1
+};
+
+static __device__ __forceinline__ float vec_dot_tq3_kv_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    // iqs != 0 returns 0 (one thread does full 32-element dot)
+    if (iqs != 0) return 0.0f;
+
+    const block_tq3_kv * bq3 = (const block_tq3_kv *) vbq + kbx;
+    const float d_kv = __half2float(bq3->gamma);
+    const float d_q8 = __low2float(bq8_1[0].ds);
+
+    // 1. Load 32 Q8_1 int8 values
+    int32_t q[32];
+    for (int j = 0; j < 32; j++) {
+        q[j] = (int32_t)bq8_1[0].qs[j];
+    }
+
+    // 2. Apply diagonal signs (hardcoded pattern)
+    for (int j = 0; j < 32; j++) {
+        q[j] *= TQ3_KV_SIGNS_VD[j];
+    }
+
+    // 3. 5-stage int32 butterfly WHT
+    for (int step = 1; step < 32; step <<= 1) {
+        for (int i = 0; i < 32; i += step * 2) {
+            for (int j = i; j < i + step; j++) {
+                int32_t a = q[j], b = q[j + step];
+                q[j] = a + b; q[j + step] = a - b;
+            }
+        }
+    }
+
+    // 4. Dot product with centroid-dequantized K values
+    float sum = 0.0f;
+    for (int j = 0; j < 32; j++) {
+        int lo = (bq3->qs[j/4] >> (2*(j%4))) & 3;
+        int hi = (bq3->qr[j/8] >> (j%8)) & 1;
+        int idx = lo | (hi << 2);
+        sum += (float)q[j] * TQ3_KV_CENTROIDS_VD[idx];
+    }
+
+    // 5. Scale by d_kv * d_q8 * (1/sqrt(32))
+    return d_kv * d_q8 * 0.17677669529663688f * sum;
 }

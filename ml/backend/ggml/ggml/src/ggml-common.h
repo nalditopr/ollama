@@ -88,6 +88,7 @@ typedef sycl::half2 ggml_half2;
 
 #define QK_K 256
 #define K_SCALE_SIZE 12
+#define QK_TQ3_KV 32
 
 #if defined(GGML_COMMON_DECL_CUDA) || defined(GGML_COMMON_DECL_HIP) || defined(GGML_COMMON_DECL_SYCL)
 // QR = QK / number of values before dequantization
@@ -170,6 +171,9 @@ typedef sycl::half2 ggml_half2;
 
 #define QI_TQ4_0_WHT (QK_K / (4*QR_TQ4_0_WHT))
 #define QR_TQ4_0_WHT 2
+
+#define QR_TQ3_KV 2   // 2 elements per dequant call (standard for convert.cu)
+#define QI_TQ3_KV (QK_TQ3_KV / (4 * QR_TQ3_KV))  // = 4
 
 #endif // GGML_COMMON_DECL_CUDA || GGML_COMMON_DECL_HIP
 
@@ -287,6 +291,15 @@ typedef struct {
     uint8_t   signs[QK_K / 8]; // 1-bit QJL sign corrections, packed 8 per byte
 } block_tq4_0;
 static_assert(sizeof(block_tq4_0) == sizeof(ggml_half) + QK_K/4 + QK_K/8 + QK_K/8, "wrong tq4_0 block size/padding");
+
+// TQ3_KV: animehacker 3-bit KV cache with WHT + symmetric centroids
+// 32 elements, 14 bytes = 3.5 bpw
+typedef struct {
+    uint8_t   qs[QK_TQ3_KV / 4];  // 2-bit low index, 4 per byte = 8 bytes
+    uint8_t   qr[QK_TQ3_KV / 8];  // 1-bit high index, 8 per byte = 4 bytes
+    ggml_half gamma;               // scale = amax / 2.1573 = 2 bytes
+} block_tq3_kv;
+static_assert(sizeof(block_tq3_kv) == QK_TQ3_KV/4 + QK_TQ3_KV/8 + sizeof(ggml_half), "wrong tq3_kv block size");
 
 //
 // Super-block quantization structures
