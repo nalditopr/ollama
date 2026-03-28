@@ -312,13 +312,13 @@ static_assert(sizeof(block_tq3_kv) == QK_TQ3_KV/4 + QK_TQ3_KV/8 + sizeof(ggml_ha
 
 // TurboQuant TURBO3_0: nalditopr 3-bit KV cache (WHT rotation + symmetric centroids)
 // 32 elements per block, 14 bytes = 3.5 bpw
-// 3-bit index split: lower 2 bits in qs[], upper 1 bit in signs[]
+// 3-bit index split: lower 2 bits in qs[], upper 1 bit in qr[]
 typedef struct {
-    ggml_half  norm;                    //  2 bytes: vector L2 norm (for rescaling)
     uint8_t    qs[QK_TURBO3 / 4];      //  8 bytes: lower 2-bit indices (4 per byte)
-    uint8_t    signs[QK_TURBO3 / 8];   //  4 bytes: upper 1-bit of 3-bit index (8 per byte)
+    uint8_t    qr[QK_TURBO3 / 8];      //  4 bytes: upper 1-bit of 3-bit index (8 per byte)
+    ggml_half  gamma;                   //  2 bytes: scale factor (amax / 2.1573)
 } block_turbo3_0;                       // 14 bytes total
-static_assert(sizeof(block_turbo3_0) == sizeof(ggml_half) + QK_TURBO3/4 + QK_TURBO3/8, "wrong turbo3_0 block size/padding");
+static_assert(sizeof(block_turbo3_0) == QK_TURBO3/4 + QK_TURBO3/8 + sizeof(ggml_half), "wrong turbo3_0 block size/padding");
 
 // TurboQuant TURBO4_0: nalditopr 4-bit KV cache (3-bit PolarQuant + 1-bit QJL)
 // 128 elements per block, 68 bytes = 4.25 bpw

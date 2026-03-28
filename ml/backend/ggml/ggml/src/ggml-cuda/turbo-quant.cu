@@ -1,70 +1,74 @@
 /*
- * TurboQuant CUDA kernels — dequantize row + set_rows (KV cache write)
- * Port of Metal implementation from ggml-metal.metal
+ * TurboQuant CUDA kernels — dequantize with inverse WHT
+ * Based on animehacker/llama-turboquant reference implementation.
+ * Per-block WHT32 rotation: no graph-level ops needed.
  */
 
 #include "turbo-quant.cuh"
-#include "dequantize.cuh"
 #include "convert.cuh"
 
 #include <cstdint>
-
-/* ===== Constant memory initialization ===== */
 
 void turbo_quant_init_cuda(cudaStream_t stream) {
     GGML_UNUSED(stream);
 }
 
-/* ===== turbo3 dequantize block kernel ===== */
-/* Each block of 32 threads processes 8 turbo3 blocks (256 elements).
- * Each thread dequantizes 8 elements (from 1 turbo3 block per iteration). */
+/* ===== turbo3 dequantize: centroid lookup + cooperative inverse WHT32 ===== */
 
 template<typename dst_t>
-static __global__ void dequantize_block_turbo3_0(
-        const void * __restrict__ vx, dst_t * __restrict__ yy, int nb32) {
+static __global__ void dequantize_block_turbo3_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const float centroids[8] = {
+        -2.1573f, -1.3336f, -0.7434f, -0.2428f,
+         0.2428f,  0.7434f,  1.3336f,  2.1573f
+    };
+    const int8_t signs[32] = {
+        +1, -1, +1, +1, -1, -1, +1, -1, +1, +1, -1, +1, -1, +1, -1, -1,
+        +1, -1, -1, +1, +1, -1, +1, -1, -1, +1, +1, +1, -1, -1, +1, -1
+    };
+
     const int64_t i = blockIdx.x;
+    const block_turbo3_0 * x = (const block_turbo3_0 *)vx;
+    const int tid = threadIdx.x;
+    if (tid >= 32) return;
 
-    /* 32 threads, each handles 8 blocks worth across iterations */
-    const int64_t tid = threadIdx.x;
-    const int64_t il  = tid / 8;   /* 0..3: which group of 8 blocks */
-    const int64_t ir  = tid % 8;   /* 0..7: which block within group */
-    const int64_t ib  = 8 * i + ir;
+    const float d = __half2float(x[i].gamma);
 
-    if (ib >= nb32) {
-        return;
+    // Step 1: Each thread dequantizes its value (3-bit index from qs + qr)
+    const int low2 = (x[i].qs[tid / 4] >> (2 * (tid % 4))) & 3;
+    const int hi1  = (x[i].qr[tid / 8] >> (tid % 8)) & 1;
+    const int idx  = low2 | (hi1 << 2);
+
+    __shared__ float shmem[32];
+    shmem[tid] = d * centroids[idx];
+    __syncthreads();
+
+    // Step 2: Cooperative inverse WHT (5 butterfly stages)
+    for (int step = 1; step < 32; step <<= 1) {
+        int partner = tid ^ step;
+        float a = shmem[tid];
+        float b = shmem[partner];
+        __syncthreads();
+        if (tid < partner) {
+            shmem[tid]     = a + b;
+            shmem[partner] = a - b;
+        }
+        __syncthreads();
     }
 
-    dst_t * y = yy + 256 * i + 32 * ir + 4 * il;
-
-    const block_turbo3_0 * x = (const block_turbo3_0 *) vx + ib;
-    const float norm = __half2float(x->norm);
-
-    /* Dequantize 4 elements at offset il*4 within this 32-element block */
-    const int off = il * 4;
-    const uint8_t qb = x->qs[il];  /* qs has 4 per byte, il selects the byte */
-    const uint8_t sb = x->signs[il / 2];
-    const int sshift = (il & 1) * 4;
-
-    for (int k = 0; k < 4; k++) {
-        const uint8_t low2 = (qb >> (k * 2)) & 0x3;
-        const uint8_t hi1  = (sb >> (sshift + k)) & 0x1;
-        const int idx = low2 | (hi1 << 2);
-        y[k] = ggml_cuda_cast<dst_t>(turbo_centroid_3bit(idx) * norm);
-    }
+    // Step 3: Normalize and undo sign flips
+    const float inv_sqrt32 = 0.17677669529663688f;
+    yy[i * QK_TURBO3 + tid] = ggml_cuda_cast<dst_t>(shmem[tid] * inv_sqrt32 * signs[tid]);
 }
 
 /* ===== turbo4 dequantize block kernel ===== */
-/* One CUDA block per turbo4 block (128 elements). 32 threads, 4 elements each. */
 
 template<typename dst_t>
 static __global__ void dequantize_block_turbo4_0(
         const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
-    const int64_t i = blockIdx.x;  /* turbo4 block index */
-    const int tid = threadIdx.x;   /* 0..31 */
+    const int64_t i = blockIdx.x;
+    const int tid = threadIdx.x;
 
-    if (i * QK_TURBO4 >= k) {
-        return;
-    }
+    if (i * QK_TURBO4 >= k) return;
 
     const block_turbo4_0 * x = (const block_turbo4_0 *) vx;
     const block_turbo4_0 & xb = x[i];
@@ -73,14 +77,11 @@ static __global__ void dequantize_block_turbo4_0(
     const float rnorm = __half2float(xb.rnorm);
     const float qjl_scale = TURBO_QJL_CONST / 128.0f * rnorm;
 
-    /* Each thread handles 4 consecutive elements */
     const int base = tid * 4;
     dst_t * out = y + i * QK_TURBO4 + base;
 
     for (int jj = 0; jj < 4; jj++) {
         const int j = base + jj;
-
-        /* Unpack 3-bit index */
         const int bit_offset = j * 3;
         const int byte_idx = bit_offset / 8;
         const int bit_pos = bit_offset % 8;
@@ -90,22 +91,232 @@ static __global__ void dequantize_block_turbo4_0(
         }
         const int idx = (raw >> bit_pos) & 0x7;
         const float centroid_val = turbo_centroid_3bit(idx);
-
-        /* QJL reconstruction */
         const int sign_bit = (xb.signs[j / 8] >> (j % 8)) & 1;
         const float qjl_val = sign_bit ? qjl_scale : -qjl_scale;
-
         out[jj] = ggml_cuda_cast<dst_t>((centroid_val + qjl_val) * norm);
     }
+}
+
+/* ===== Optimization #2: Flat no-WHT dequant — no shared memory, no syncthreads ===== */
+/* Each thread handles 4 elements independently. 256 threads per block, 1024 elements/block.
+ * No cooperative computation needed since there's no WHT butterfly.
+ * 32x fewer kernel launches than the per-block version. */
+
+template<typename dst_t>
+static __global__ void dequantize_flat_turbo3_0_no_wht(
+        const void * __restrict__ vx, dst_t * __restrict__ yy, const int64_t n_elements) {
+    /* Optimization #3: Shared memory centroid LUT — loaded once per block */
+    __shared__ float sh_cn[8];
+    if (threadIdx.x < 8) {
+        const float cn[8] = {-2.1573f, -1.3336f, -0.7434f, -0.2428f,
+                              0.2428f,  0.7434f,  1.3336f,  2.1573f};
+        sh_cn[threadIdx.x] = cn[threadIdx.x];
+    }
+    __syncthreads();
+
+    const int64_t elem = (int64_t)blockIdx.x * blockDim.x * 4 + threadIdx.x * 4;
+    if (elem >= n_elements) return;
+
+    const block_turbo3_0 * x = (const block_turbo3_0 *)vx;
+    const int64_t ib = elem / QK_TURBO3;
+    const int j_base = elem % QK_TURBO3;
+    const float d = __half2float(x[ib].gamma);
+
+    /* Batch-read one qs byte (4 elements) + half signs byte */
+    const uint8_t qb = x[ib].qs[j_base / 4];
+    const uint8_t sb = x[ib].qr[j_base / 8];
+    const int sshift = j_base % 8;
+
+    #pragma unroll
+    for (int l = 0; l < 4 && elem + l < n_elements; l++) {
+        const int low2 = (qb >> (l * 2)) & 3;
+        const int hi1  = (sb >> (sshift + l)) & 1;
+        yy[elem + l] = ggml_cuda_cast<dst_t>(d * sh_cn[low2 | (hi1 << 2)]);
+    }
+}
+
+/* ===== Optimization #1: Fused V dequant + attention matmul ===== */
+/* Computes kqv = (V_turbo3_dequanted_no_wht)^T * attn_weights without writing V_f32 to DRAM.
+ * Each CUDA block computes one output element kqv[head_dim_idx, query_idx].
+ * V data is read directly from turbo3 blocks, dequanted in registers. */
+
+static __global__ void turbo3_fused_v_attn_kernel(
+        const void * __restrict__ v_data,     // turbo3 V cache [n_kv, head_dim] per head
+        const float * __restrict__ attn,      // attention weights [n_kv, n_q] per head
+        float * __restrict__ output,          // output [head_dim, n_q] per head
+        const int64_t n_kv,                   // number of KV positions
+        const int64_t head_dim,               // head dimension (e.g. 128)
+        const int64_t n_q,                    // number of query positions (1 during decode)
+        const int64_t v_stride_row,           // byte stride between V rows (n_kv dim)
+        const int64_t attn_stride_row) {      // stride between attn rows
+
+    /* Shared memory centroid LUT */
+    __shared__ float sh_cn[8];
+    if (threadIdx.x < 8) {
+        const float cn[8] = {-2.1573f, -1.3336f, -0.7434f, -0.2428f,
+                              0.2428f,  0.7434f,  1.3336f,  2.1573f};
+        sh_cn[threadIdx.x] = cn[threadIdx.x];
+    }
+    __syncthreads();
+
+    /* Each block handles one (head_dim_idx, q_idx) output element.
+     * Threads cooperatively iterate over n_kv positions. */
+    const int64_t hd_idx = blockIdx.x;   // which head_dim element
+    const int64_t q_idx  = blockIdx.y;   // which query position
+
+    if (hd_idx >= head_dim || q_idx >= n_q) return;
+
+    /* Which turbo3 block and position within block for this head_dim element */
+    const int ib_local = hd_idx / QK_TURBO3;   // block index within one V row
+    const int j_in_block = hd_idx % QK_TURBO3; // element within block
+    const int qs_byte_idx = j_in_block / 4;
+    const int qs_shift = (j_in_block % 4) * 2;
+    const int qr_byte_idx = j_in_block / 8;
+    const int qr_shift = j_in_block % 8;
+
+    float sum = 0.0f;
+
+    /* Iterate over KV positions, each thread handles a stride */
+    for (int64_t k = threadIdx.x; k < n_kv; k += blockDim.x) {
+        /* Dequant V[k, hd_idx] from turbo3 — in registers, no DRAM write */
+        const char * v_row = (const char *)v_data + k * v_stride_row;
+        const block_turbo3_0 * blk = (const block_turbo3_0 *)v_row + ib_local;
+
+        const float d = __half2float(blk->gamma);
+        const int low2 = (blk->qs[qs_byte_idx] >> qs_shift) & 3;
+        const int hi1  = (blk->qr[qr_byte_idx] >> qr_shift) & 1;
+        const float v_val = d * sh_cn[low2 | (hi1 << 2)];
+
+        /* Multiply by attention weight */
+        sum += v_val * attn[k * attn_stride_row + q_idx];
+    }
+
+    /* Warp reduction */
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    /* Block reduction via shared memory */
+    __shared__ float sh_partial[32];  // one per warp
+    const int warp_id = threadIdx.x / 32;
+    const int lane_id = threadIdx.x % 32;
+
+    if (lane_id == 0) sh_partial[warp_id] = sum;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum = (lane_id < (blockDim.x + 31) / 32) ? sh_partial[lane_id] : 0.0f;
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+        if (lane_id == 0) {
+            output[hd_idx * n_q + q_idx] = sum;
+        }
+    }
+}
+
+/* Launch fused V*attn kernel */
+void turbo3_fused_v_attn_cuda(
+        const void * v_data, const float * attn, float * output,
+        int64_t n_kv, int64_t head_dim, int64_t n_q, int64_t n_heads,
+        int64_t v_stride_row, int64_t v_stride_head,
+        int64_t attn_stride_row, int64_t attn_stride_head,
+        int64_t out_stride_head,
+        cudaStream_t stream) {
+
+    const int threads = min((int)n_kv, 256);
+    dim3 grid(head_dim, n_q);
+
+    for (int64_t h = 0; h < n_heads; h++) {
+        const char * v_head = (const char *)v_data + h * v_stride_head;
+        const float * attn_head = attn + h * attn_stride_head;
+        float * out_head = output + h * out_stride_head;
+
+        turbo3_fused_v_attn_kernel<<<grid, threads, 0, stream>>>(
+            v_head, attn_head, out_head,
+            n_kv, head_dim, n_q, v_stride_row, attn_stride_row);
+    }
+}
+
+/* ===== Inverse WHT32 kernel for output (post-matmul) ===== */
+/* Each CUDA block processes one 32-element WHT block cooperatively. */
+
+static __global__ void turbo3_inverse_wht32_kernel(float * __restrict__ data, const int64_t n_elements) {
+    const int8_t signs[32] = {
+        +1, -1, +1, +1, -1, -1, +1, -1, +1, +1, -1, +1, -1, +1, -1, -1,
+        +1, -1, -1, +1, +1, -1, +1, -1, -1, +1, +1, +1, -1, -1, +1, -1
+    };
+
+    const int64_t block_idx = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (block_idx * 32 + tid >= n_elements) return;
+
+    __shared__ float shmem[32];
+    shmem[tid] = data[block_idx * 32 + tid];
+    __syncthreads();
+
+    for (int step = 1; step < 32; step <<= 1) {
+        int partner = tid ^ step;
+        float a = shmem[tid];
+        float b = shmem[partner];
+        __syncthreads();
+        if (tid < partner) {
+            shmem[tid]     = a + b;
+            shmem[partner] = a - b;
+        }
+        __syncthreads();
+    }
+
+    const float inv_sqrt32 = 0.17677669529663688f;
+    data[block_idx * 32 + tid] = shmem[tid] * inv_sqrt32 * signs[tid];
+}
+
+void turbo3_inverse_wht32_cuda(float * data, int64_t n_elements, cudaStream_t stream) {
+    GGML_ASSERT(n_elements % 32 == 0);
+    const int nb = n_elements / 32;
+    turbo3_inverse_wht32_kernel<<<nb, 32, 0, stream>>>(data, n_elements);
+}
+
+/* ===== TURBO_WHT graph op (for post-matmul inverse WHT on output) ===== */
+
+void ggml_cuda_op_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const float * src0_d = (const float *)src0->data;
+    float * dst_d = (float *)dst->data;
+
+    int direction;
+    memcpy(&direction, dst->op_params, sizeof(int));
+
+    const int64_t ne = ggml_nelements(src0);
+    cudaStream_t stream = ctx.stream();
+
+    if (src0_d != dst_d) {
+        cudaMemcpyAsync(dst_d, src0_d, ne * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+    }
+
+    /* direction=1 → inverse WHT32 (for V output), direction=0 → forward (not used here) */
+    GGML_ASSERT(ne % 32 == 0);
+    turbo3_inverse_wht32_cuda(dst_d, ne, stream);
+    /* Note: forward WHT would need a separate kernel. For now only inverse is used. */
 }
 
 /* ===== Row dequantize launchers ===== */
 
 template<typename dst_t>
 void dequantize_row_turbo3_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
-    const int nb32 = k / QK_TURBO3;
-    const int nb = (k + 255) / 256;
-    dequantize_block_turbo3_0<<<nb, 32, 0, stream>>>(vx, y, nb32);
+    const int nb = k / QK_TURBO3;
+    dequantize_block_turbo3_0<<<nb, 32, 0, stream>>>(vx, y);
+}
+
+template<typename dst_t>
+void dequantize_row_turbo3_0_no_wht_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    /* Flat kernel: 256 threads, 4 elements/thread = 1024 elements/block */
+    const int threads = 256;
+    const int elems_per_block = threads * 4;
+    const int nb = (k + elems_per_block - 1) / elems_per_block;
+    dequantize_flat_turbo3_0_no_wht<<<nb, threads, 0, stream>>>(vx, y, k);
 }
 
 template<typename dst_t>
@@ -120,297 +331,9 @@ template void dequantize_row_turbo3_0_cuda<float>(const void * vx, float * y, co
 template void dequantize_row_turbo3_0_cuda<half>(const void * vx, half * y, const int64_t k, cudaStream_t stream);
 template void dequantize_row_turbo3_0_cuda<nv_bfloat16>(const void * vx, nv_bfloat16 * y, const int64_t k, cudaStream_t stream);
 
+template void dequantize_row_turbo3_0_no_wht_cuda<float>(const void * vx, float * y, const int64_t k, cudaStream_t stream);
+template void dequantize_row_turbo3_0_no_wht_cuda<half>(const void * vx, half * y, const int64_t k, cudaStream_t stream);
+
 template void dequantize_row_turbo4_0_cuda<float>(const void * vx, float * y, const int64_t k, cudaStream_t stream);
 template void dequantize_row_turbo4_0_cuda<half>(const void * vx, half * y, const int64_t k, cudaStream_t stream);
 template void dequantize_row_turbo4_0_cuda<nv_bfloat16>(const void * vx, nv_bfloat16 * y, const int64_t k, cudaStream_t stream);
-
-/* ===== Custom set_rows kernel for turbo3 ===== */
-/* Each thread processes one 128-element rotation group (4 blocks of 32).
- * WHT rotation in registers, then quantize + norm correction. */
-
-template <typename idx_t>
-static __global__ void __launch_bounds__(64)
-k_set_rows_turbo3(const float * __restrict__ src0,
-                   const idx_t * __restrict__ src1,
-                   block_turbo3_0 * __restrict__ dst,
-                   const int64_t ne_total_groups,
-                   const int64_t ne10,
-                   const int64_t ne11,
-                   const int64_t ne12,
-                   const int64_t ne13,
-                   const int64_t s01,
-                   const int64_t s02,
-                   const int64_t s03,
-                   const int64_t s10,
-                   const int64_t s11,
-                   const int64_t s12,
-                   const int64_t s1,
-                   const int64_t s2,
-                   const int64_t s3,
-                   const uint3   ne00,
-                   const uint3   ne01,
-                   const uint3   ne02,
-                   const uint3   ne11_fd,
-                   const uint3   ne12_fd) {
-    const int64_t i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x;
-
-    if (i >= ne_total_groups) {
-        return;
-    }
-
-    /* Decompose linear index into (i00_grp, i01, i02, i03) */
-    /* i00_grp is the rotation group index within a row, units of 128 elements (= 4 blocks) */
-    uint32_t tmp = (uint32_t)(i * QK_TURBO3_GROUP);  /* convert to element index for decomposition */
-    uint2 div_mod;
-
-    div_mod           = fast_div_modulo(tmp, ne00);
-    const int64_t i00 = div_mod.y;  /* element offset in row (multiple of 128) */
-    tmp               = div_mod.x;
-
-    div_mod           = fast_div_modulo(tmp, ne01);
-    const int64_t i01 = div_mod.y;
-    tmp               = div_mod.x;
-
-    div_mod           = fast_div_modulo(tmp, ne02);
-    const int64_t i02 = div_mod.y;
-    const int64_t i03 = div_mod.x;
-
-    const int64_t i12 = fastmodulo((uint32_t)i03, ne12_fd);
-    const int64_t i11 = fastmodulo((uint32_t)i02, ne11_fd);
-    const int64_t i10 = i01;
-
-    const int64_t dst_row = *(src1 + i10*s10 + i11*s11 + i12*s12);
-
-    const float * src0_row = src0 + i01*s01 + i02*s02 + i03*s03;
-    block_turbo3_0 * dst_row_ptr = (block_turbo3_0 *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3);
-
-    const float * grp_src = src0_row + i00;
-    block_turbo3_0 * grp_dst = dst_row_ptr + (i00 / QK_TURBO3);
-
-    /* Call the device quantize function */
-    turbo3_quantize_group(grp_src, grp_dst);
-
-    GGML_UNUSED(ne10);
-    GGML_UNUSED(ne11);
-    GGML_UNUSED(ne12);
-    GGML_UNUSED(ne13);
-}
-
-/* ===== Custom set_rows kernel for turbo4 ===== */
-
-template <typename idx_t>
-static __global__ void __launch_bounds__(64)
-k_set_rows_turbo4(const float * __restrict__ src0,
-                   const idx_t * __restrict__ src1,
-                   block_turbo4_0 * __restrict__ dst,
-                   const int64_t ne_total_blocks,
-                   const int64_t ne10,
-                   const int64_t ne11,
-                   const int64_t ne12,
-                   const int64_t ne13,
-                   const int64_t s01,
-                   const int64_t s02,
-                   const int64_t s03,
-                   const int64_t s10,
-                   const int64_t s11,
-                   const int64_t s12,
-                   const int64_t s1,
-                   const int64_t s2,
-                   const int64_t s3,
-                   const uint3   ne00,
-                   const uint3   ne01,
-                   const uint3   ne02,
-                   const uint3   ne11_fd,
-                   const uint3   ne12_fd) {
-    const int64_t i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x;
-
-    if (i >= ne_total_blocks) {
-        return;
-    }
-
-    uint32_t tmp = (uint32_t)(i * QK_TURBO4);
-    uint2 div_mod;
-
-    div_mod           = fast_div_modulo(tmp, ne00);
-    const int64_t i00 = div_mod.y;
-    tmp               = div_mod.x;
-
-    div_mod           = fast_div_modulo(tmp, ne01);
-    const int64_t i01 = div_mod.y;
-    tmp               = div_mod.x;
-
-    div_mod           = fast_div_modulo(tmp, ne02);
-    const int64_t i02 = div_mod.y;
-    const int64_t i03 = div_mod.x;
-
-    const int64_t i12 = fastmodulo((uint32_t)i03, ne12_fd);
-    const int64_t i11 = fastmodulo((uint32_t)i02, ne11_fd);
-    const int64_t i10 = i01;
-
-    const int64_t dst_row = *(src1 + i10*s10 + i11*s11 + i12*s12);
-
-    const float * src0_row = src0 + i01*s01 + i02*s02 + i03*s03;
-    block_turbo4_0 * dst_row_ptr = (block_turbo4_0 *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3);
-
-    const float * blk_src = src0_row + i00;
-    block_turbo4_0 * blk_dst = dst_row_ptr + (i00 / QK_TURBO4);
-
-    turbo4_quantize_block(blk_src, blk_dst);
-
-    GGML_UNUSED(ne10);
-    GGML_UNUSED(ne11);
-    GGML_UNUSED(ne12);
-    GGML_UNUSED(ne13);
-}
-
-/* ===== set_rows launcher for turbo3 ===== */
-
-template<typename idx_t>
-void set_rows_turbo3_cuda(
-        const float * src0_d, const idx_t * src1_d, block_turbo3_0 * dst_d,
-        int64_t ne00, int64_t ne01, int64_t ne02, int64_t ne03,
-        int64_t ne10, int64_t ne11, int64_t ne12, int64_t ne13,
-        size_t nb01, size_t nb02, size_t nb03,
-        size_t nb10, size_t nb11, size_t nb12,
-        size_t nb1, size_t nb2, size_t nb3,
-        cudaStream_t stream) {
-
-    GGML_ASSERT(ne00 % QK_TURBO3_GROUP == 0);
-    const int64_t ne_total_groups = (ne00 * ne01 * ne02 * ne03) / QK_TURBO3_GROUP;
-    const int num_blocks = (ne_total_groups + 63) / 64;
-
-    const int64_t s01 = nb01 / sizeof(float);
-    const int64_t s02 = nb02 / sizeof(float);
-    const int64_t s03 = nb03 / sizeof(float);
-    const int64_t s10 = nb10 / sizeof(idx_t);
-    const int64_t s11 = nb11 / sizeof(idx_t);
-    const int64_t s12 = nb12 / sizeof(idx_t);
-    const int64_t s1  = nb1;
-    const int64_t s2  = nb2;
-    const int64_t s3  = nb3;
-
-    if (ne_total_groups > 0 && ne00 > 0 && ne01 > 0 && ne02 > 0 && ne11 > 0 && ne12 > 0) {
-        const uint3 ne00_fd = init_fastdiv_values((uint32_t)ne00);
-        const uint3 ne01_fd = init_fastdiv_values((uint32_t)ne01);
-        const uint3 ne02_fd = init_fastdiv_values((uint32_t)ne02);
-        const uint3 ne11_fd = init_fastdiv_values((uint32_t)ne11);
-        const uint3 ne12_fd = init_fastdiv_values((uint32_t)ne12);
-
-        k_set_rows_turbo3<<<num_blocks, 64, 0, stream>>>(
-            src0_d, src1_d, dst_d, ne_total_groups,
-            ne10, ne11, ne12, ne13,
-            s01, s02, s03, s10, s11, s12, s1, s2, s3,
-            ne00_fd, ne01_fd, ne02_fd, ne11_fd, ne12_fd);
-    }
-}
-
-/* ===== set_rows launcher for turbo4 ===== */
-
-template<typename idx_t>
-void set_rows_turbo4_cuda(
-        const float * src0_d, const idx_t * src1_d, block_turbo4_0 * dst_d,
-        int64_t ne00, int64_t ne01, int64_t ne02, int64_t ne03,
-        int64_t ne10, int64_t ne11, int64_t ne12, int64_t ne13,
-        size_t nb01, size_t nb02, size_t nb03,
-        size_t nb10, size_t nb11, size_t nb12,
-        size_t nb1, size_t nb2, size_t nb3,
-        cudaStream_t stream) {
-
-    GGML_ASSERT(ne00 % QK_TURBO4 == 0);
-    const int64_t ne_total_blocks = (ne00 * ne01 * ne02 * ne03) / QK_TURBO4;
-    const int num_blocks = (ne_total_blocks + 63) / 64;
-
-    const int64_t s01 = nb01 / sizeof(float);
-    const int64_t s02 = nb02 / sizeof(float);
-    const int64_t s03 = nb03 / sizeof(float);
-    const int64_t s10 = nb10 / sizeof(idx_t);
-    const int64_t s11 = nb11 / sizeof(idx_t);
-    const int64_t s12 = nb12 / sizeof(idx_t);
-    const int64_t s1  = nb1;
-    const int64_t s2  = nb2;
-    const int64_t s3  = nb3;
-
-    if (ne_total_blocks > 0 && ne00 > 0 && ne01 > 0 && ne02 > 0 && ne11 > 0 && ne12 > 0) {
-        const uint3 ne00_fd = init_fastdiv_values((uint32_t)ne00);
-        const uint3 ne01_fd = init_fastdiv_values((uint32_t)ne01);
-        const uint3 ne02_fd = init_fastdiv_values((uint32_t)ne02);
-        const uint3 ne11_fd = init_fastdiv_values((uint32_t)ne11);
-        const uint3 ne12_fd = init_fastdiv_values((uint32_t)ne12);
-
-        k_set_rows_turbo4<<<num_blocks, 64, 0, stream>>>(
-            src0_d, src1_d, dst_d, ne_total_blocks,
-            ne10, ne11, ne12, ne13,
-            s01, s02, s03, s10, s11, s12, s1, s2, s3,
-            ne00_fd, ne01_fd, ne02_fd, ne11_fd, ne12_fd);
-    }
-}
-
-/* Explicit template instantiations for set_rows launchers */
-template void set_rows_turbo3_cuda<int64_t>(
-    const float *, const int64_t *, block_turbo3_0 *,
-    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
-    size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t, cudaStream_t);
-template void set_rows_turbo3_cuda<int32_t>(
-    const float *, const int32_t *, block_turbo3_0 *,
-    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
-    size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t, cudaStream_t);
-template void set_rows_turbo4_cuda<int64_t>(
-    const float *, const int64_t *, block_turbo4_0 *,
-    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
-    size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t, cudaStream_t);
-template void set_rows_turbo4_cuda<int32_t>(
-    const float *, const int32_t *, block_turbo4_0 *,
-    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
-    size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t, cudaStream_t);
-
-/* ===== TURBO_WHT kernel — graph-level Walsh-Hadamard rotation ===== */
-/* Applies forward (direction=0) or inverse (direction=1) WHT rotation to fp32 data.
- * Each thread processes one 128-element group.
- * This is used at graph level to pre-rotate queries and inverse-rotate attention output,
- * so that the dequantize path can be a simple centroid lookup without rotation. */
-
-static __global__ void k_turbo_wht(
-        const float * __restrict__ src,
-        float       * __restrict__ dst,
-        const int64_t n_groups,
-        const int     direction) {
-    const int64_t group_idx = int64_t(blockDim.x) * blockIdx.x + threadIdx.x;
-    if (group_idx >= n_groups) return;
-
-    const float * in  = src + group_idx * 128;
-    float       * out = dst + group_idx * 128;
-
-    float x[128];
-
-    if (direction == 0) {
-        /* Forward: signs1 * FWHT * signs2 */
-        for (int i = 0; i < 128; i++) x[i] = in[i] * (float)turbo_wht_signs1_d[i];
-        turbo_fwht_128(x);
-        for (int i = 0; i < 128; i++) out[i] = x[i] * (float)turbo_wht_signs2_d[i];
-    } else {
-        /* Inverse: signs2 * FWHT * signs1 (FWHT is self-inverse) */
-        for (int i = 0; i < 128; i++) x[i] = in[i] * (float)turbo_wht_signs2_d[i];
-        turbo_fwht_128(x);
-        for (int i = 0; i < 128; i++) out[i] = x[i] * (float)turbo_wht_signs1_d[i];
-    }
-}
-
-void ggml_cuda_op_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * src0 = dst->src[0];
-    const float * src0_d = (const float *)src0->data;
-    float * dst_d = (float *)dst->data;
-
-    int direction;
-    memcpy(&direction, dst->op_params, sizeof(int));
-
-
-    const int64_t n_elements = ggml_nelements(src0);
-    GGML_ASSERT(n_elements % 128 == 0);
-    const int64_t n_groups = n_elements / 128;
-
-    cudaStream_t stream = ctx.stream();
-    const int block_size = 256;
-    const int grid_size = (n_groups + block_size - 1) / block_size;
-
-    k_turbo_wht<<<grid_size, block_size, 0, stream>>>(src0_d, dst_d, n_groups, direction);
-}

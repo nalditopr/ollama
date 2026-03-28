@@ -910,10 +910,10 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0(
             const int ib = elem / QK_TURBO3;
             const int j_base = elem % QK_TURBO3;
 
-            const float norm = __half2float(K_turbo[ib].norm);
+            const float norm = __half2float(K_turbo[ib].gamma);
 
             const uint8_t qb = K_turbo[ib].qs[j_base / 4];
-            const uint8_t sb = K_turbo[ib].signs[j_base / 8];
+            const uint8_t sb = K_turbo[ib].qr[j_base / 8];
             const int sshift = (j_base % 8);
 
             const float v0 = cn[( qb       & 0x03) | (((sb >> (sshift    )) & 1) << 2)] * norm;
@@ -947,7 +947,7 @@ static __device__ __forceinline__ void dequantize_V_turbo3_0(const void * __rest
     const block_turbo3_0 * x = (const block_turbo3_0 *) vx;
     const int64_t ib  = i0 / QK_TURBO3;
     const int     iqs = i0 % QK_TURBO3;
-    const float norm = __half2float(x[ib].norm);
+    const float norm = __half2float(x[ib].gamma);
 
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same<T, half>::value) {
@@ -955,7 +955,7 @@ static __device__ __forceinline__ void dequantize_V_turbo3_0(const void * __rest
         for (int l0 = 0; l0 < ne; l0 += 4) {
             const int j = iqs + l0;
             const uint8_t qb = x[ib].qs[j / 4];
-            const uint8_t sb = x[ib].signs[j / 8];
+            const uint8_t sb = x[ib].qr[j / 8];
             const int sshift = j % 8;
 
             const float f0 = cn[( qb       & 0x03) | (((sb >> (sshift    )) & 1) << 2)] * norm;
@@ -973,7 +973,7 @@ static __device__ __forceinline__ void dequantize_V_turbo3_0(const void * __rest
         for (int l0 = 0; l0 < ne; l0 += 4) {
             const int j = iqs + l0;
             const uint8_t qb = x[ib].qs[j / 4];
-            const uint8_t sb = x[ib].signs[j / 8];
+            const uint8_t sb = x[ib].qr[j / 8];
             const int sshift = j % 8;
 
             ((float *) dst)[l0    ] = cn[( qb       & 0x03) | (((sb >> (sshift    )) & 1) << 2)] * norm;

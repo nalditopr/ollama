@@ -181,9 +181,9 @@ void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * G
     for (int i = 0; i < nb; i++) {
         float norm = 0.0f;
         for (int j = 0; j < QK_TURBO3; j++) norm += x[i*QK_TURBO3 + j] * x[i*QK_TURBO3 + j];
-        y[i].norm = GGML_FP32_TO_FP16(sqrtf(norm));
+        y[i].gamma = GGML_FP32_TO_FP16(sqrtf(norm));
         memset(y[i].qs, 0, QK_TURBO3 / 4);
-        memset(y[i].signs, 0, QK_TURBO3 / 8);
+        memset(y[i].qr, 0, QK_TURBO3 / 8);
     }
 }
 
@@ -192,10 +192,10 @@ void dequantize_row_turbo3_0(const block_turbo3_0 * GGML_RESTRICT x, float * GGM
     assert(k % QK_TURBO3 == 0);
     const int nb = k / QK_TURBO3;
     for (int block = 0; block < nb; block++) {
-        float norm = GGML_FP16_TO_FP32(x[block].norm);
+        float norm = GGML_FP16_TO_FP32(x[block].gamma);
         for (int j = 0; j < QK_TURBO3; j++) {
             uint8_t low2 = (x[block].qs[j/4] >> ((j%4)*2)) & 0x3;
-            uint8_t hi1 = (x[block].signs[j/8] >> (j%8)) & 0x1;
+            uint8_t hi1 = (x[block].qr[j/8] >> (j%8)) & 0x1;
             uint8_t idx = low2 | (hi1 << 2);
             y[block * QK_TURBO3 + j] = CENTROIDS_3BIT[idx] * norm;
         }
