@@ -868,7 +868,7 @@ func (f GGML) SupportsKVCacheType(cacheType string) bool {
 		return true
 	}
 
-	return slices.Contains([]string{"q8_0", "q4_0", "tq3", "tq4", "turbo3", "turbo4"}, cacheType)
+	return slices.Contains([]string{"q8_0", "q4_0", "tq3", "tq4", "turbo3", "turbo4", "mxfp4"}, cacheType)
 }
 
 // KVCacheTypeIsQuantized checks if the requested cache type is a quantized type

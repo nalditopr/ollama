@@ -74,6 +74,8 @@ func ParseFileType(s string) (FileType, error) {
 		return FileTypeTQ3_0, nil
 	case "TQ4_0":
 		return FileTypeTQ4_0, nil
+	case "MXFP4":
+		return fileTypeMXFP4, nil
 	default:
 		supportedFileTypes := []FileType{
 			FileTypeF32,

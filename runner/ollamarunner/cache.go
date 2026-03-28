@@ -72,6 +72,8 @@ func kvCacheTypeFromStr(s string) ml.DType {
 		return ml.DTypeTurbo3
 	case "turbo4":
 		return ml.DTypeTurbo4
+	case "mxfp4":
+		return ml.DTypeMXFP4
 	default:
 		return ml.DTypeF16
 	}

@@ -161,6 +161,8 @@ func kvCacheTypeFromStr(s string) C.enum_ggml_type {
 		return C.GGML_TYPE_TURBO3_0
 	case "turbo4":
 		return C.GGML_TYPE_TURBO4_0
+	case "mxfp4":
+		return C.GGML_TYPE_MXFP4
 	default:
 		return C.GGML_TYPE_F16
 	}
