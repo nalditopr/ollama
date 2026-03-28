@@ -761,6 +761,22 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) dequantize_row_tq3_kv,
         .from_float_ref           = (ggml_from_float_t) quantize_row_tq3_kv_ref,
     },
+    [GGML_TYPE_TURBO3_0] = {
+        .type_name                = "turbo3",
+        .blck_size                = QK_TURBO3,
+        .type_size                = sizeof(block_turbo3_0),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_turbo3_0,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_turbo3_0_ref,
+    },
+    [GGML_TYPE_TURBO4_0] = {
+        .type_name                = "turbo4",
+        .blck_size                = QK_TURBO4,
+        .type_size                = sizeof(block_turbo4_0),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_turbo4_0,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_turbo4_0_ref,
+    },
     [GGML_TYPE_Q2_K] = {
         .type_name                = "q2_K",
         .blck_size                = QK_K,
@@ -1073,6 +1089,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GATED_LINEAR_ATTN",
     "RWKV_WKV7",
     "SOLVE_TRI",
+    "TURBO_WHT",
 
     "UNARY",
 
@@ -1090,7 +1107,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 95, "GGML_OP_COUNT != 95");
+static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1182,6 +1199,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "gated_linear_attn(k, v, q, gate, s)",
     "rwkv_wkv7(r, w, k, v, a, b, s)",
     "A X = B, A triangular, solve X",
+    "turbo_wht(a)",
 
     "unary(x)",
 
@@ -1199,7 +1217,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 95, "GGML_OP_COUNT != 95");
+static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6142,6 +6160,28 @@ struct ggml_tensor * ggml_solve_tri(
     return result;
 }
 
+// ggml_turbo_wht
+
+struct ggml_tensor * ggml_turbo_wht(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   direction) {
+    GGML_ASSERT(ggml_is_contiguous(a));
+    GGML_ASSERT(a->type == GGML_TYPE_F32);
+    GGML_ASSERT(a->ne[0] % 128 == 0);  // ne[0] must be divisible by rotation group size
+    GGML_ASSERT(direction == 0 || direction == 1);
+
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, a->ne);
+
+    result->op = GGML_OP_TURBO_WHT;
+    result->src[0] = a;
+
+    // Store direction in op_params: 0 = forward, 1 = inverse
+    memcpy(result->op_params, &direction, sizeof(int));
+
+    return result;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 struct ggml_hash_set ggml_hash_set_new(size_t size) {
@@ -7582,6 +7622,8 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_TQ3_0_WHT: result = quantize_tq3_0_wht(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_TQ4_0_WHT: result = quantize_tq4_0_wht(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_TQ3_KV:    result = quantize_tq3_kv(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TURBO3_0: result = quantize_turbo3_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_TURBO4_0: result = quantize_turbo4_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ2_XXS: result = quantize_iq2_xxs(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ2_XS:  result = quantize_iq2_xs (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ3_XXS: result = quantize_iq3_xxs(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;

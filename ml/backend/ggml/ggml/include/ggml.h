@@ -427,7 +427,9 @@ extern "C" {
         GGML_TYPE_TQ3_0_WHT = 42, // TurboQuant 3-bit with WHT rotation
         GGML_TYPE_TQ4_0_WHT = 43, // TurboQuant 4-bit with WHT rotation
         GGML_TYPE_TQ3_KV    = 44, // TurboQuant 3-bit KV cache (animehacker WHT + symmetric centroids)
-        GGML_TYPE_COUNT   = 45,
+        GGML_TYPE_TURBO3_0  = 45, // TurboQuant 3-bit KV cache: 2-bit PolarQuant + 1-bit QJL (nalditopr)
+        GGML_TYPE_TURBO4_0  = 46, // TurboQuant 4-bit KV cache: 3-bit PolarQuant + 1-bit QJL (nalditopr)
+        GGML_TYPE_COUNT   = 47,
     };
 
     // precision
@@ -560,6 +562,7 @@ extern "C" {
         GGML_OP_GATED_LINEAR_ATTN,
         GGML_OP_RWKV_WKV7,
         GGML_OP_SOLVE_TRI,
+        GGML_OP_TURBO_WHT,
 
         GGML_OP_UNARY,
 
@@ -2468,6 +2471,13 @@ extern "C" {
         bool                  left,
         bool                  lower,
         bool                  uni);
+
+    // TurboQuant Walsh-Hadamard Transform (O(d log d) rotation for KV cache compression)
+    // direction: 0 = forward (signs1 -> WHT -> signs2), 1 = inverse (signs2 -> WHT -> signs1)
+    GGML_API struct ggml_tensor * ggml_turbo_wht(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   direction);
 
     // custom operators
 

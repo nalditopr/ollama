@@ -206,3 +206,29 @@ static __device__ __forceinline__ void dequantize_tq3_kv(const void * vx, const 
     v.x = d * TQ3_KV_CENTROIDS_DQ[idx0];
     v.y = d * TQ3_KV_CENTROIDS_DQ[idx1];
 }
+
+// TurboQuant TURBO3_0 dequantize (float2 interface for convert.cu template)
+static __constant__ const float TURBO3_CENTROIDS_DQ[8] = {
+    -0.190685f, -0.117832f, -0.065717f, -0.021460f,
+     0.021460f,  0.065717f,  0.117832f,  0.190685f
+};
+
+static __device__ __forceinline__ void dequantize_turbo3_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_turbo3_0 * x = (const block_turbo3_0 *) vx;
+    const float norm = __half2float(x[ib].norm);
+
+    const int j0 = iqs;
+    const int j1 = j0 + 1;
+
+    // Extract 3-bit indices (2-bit lo in qs + 1-bit hi in signs)
+    const uint8_t lo0 = (x[ib].qs[j0/4] >> ((j0%4)*2)) & 0x3;
+    const uint8_t hi0 = (x[ib].signs[j0/8] >> (j0%8)) & 0x1;
+    const uint8_t lo1 = (x[ib].qs[j1/4] >> ((j1%4)*2)) & 0x3;
+    const uint8_t hi1 = (x[ib].signs[j1/8] >> (j1%8)) & 0x1;
+
+    const uint8_t idx0 = lo0 | (hi0 << 2);
+    const uint8_t idx1 = lo1 | (hi1 << 2);
+
+    v.x = norm * TURBO3_CENTROIDS_DQ[idx0];
+    v.y = norm * TURBO3_CENTROIDS_DQ[idx1];
+}

@@ -74,6 +74,12 @@ if (CUDAToolkit_FOUND)
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
     endif()
 
+    # TurboQuant FA instances: always built (not gated by FA_ALL_QUANTS)
+    file(GLOB   SRCS "template-instances/fattn-vec*turbo3_0-turbo3_0.cu")
+    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    file(GLOB   SRCS "template-instances/fattn-vec*turbo4_0-turbo4_0.cu")
+    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+
     ggml_add_backend_library(ggml-cuda
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}

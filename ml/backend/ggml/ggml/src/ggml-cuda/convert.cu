@@ -1,5 +1,6 @@
 #include "convert.cuh"
 #include "dequantize.cuh"
+#include "turbo-quant.cuh"
 
 #include <cstdint>
 
@@ -764,6 +765,10 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_block_cont_cuda<QK_K, QR_TQ4_0_WHT, dequantize_tq4_0_wht>;
         case GGML_TYPE_TQ3_KV:
             return dequantize_row_tq3_kv_cuda;
+        case GGML_TYPE_TURBO3_0:
+            return dequantize_row_turbo3_0_cuda<half>;
+        case GGML_TYPE_TURBO4_0:
+            return dequantize_row_turbo4_0_cuda<half>;
         case GGML_TYPE_F32:
             return convert_unary_cont_cuda<float>;
         case GGML_TYPE_BF16:
@@ -825,6 +830,10 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return dequantize_block_cont_cuda<QK_K, QR_TQ4_0_WHT, dequantize_tq4_0_wht>;
         case GGML_TYPE_TQ3_KV:
             return dequantize_row_tq3_kv_cuda;
+        case GGML_TYPE_TURBO3_0:
+            return dequantize_row_turbo3_0_cuda<float>;
+        case GGML_TYPE_TURBO4_0:
+            return dequantize_row_turbo4_0_cuda<float>;
         case GGML_TYPE_F16:
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_BF16:
@@ -852,6 +861,8 @@ to_fp16_nc_cuda_t ggml_get_to_fp16_nc_cuda(ggml_type type) {
             return convert_unary_cuda<nv_bfloat16>;
         case GGML_TYPE_TQ3_KV:
             return dequantize_block_cuda<QK_TQ3_KV, QR_TQ3_KV, dequantize_tq3_kv>;
+        case GGML_TYPE_TURBO3_0:
+            return dequantize_block_cuda<QK_TURBO3, QR_TURBO3, dequantize_turbo3_0>;
         default:
             return nullptr;
     }
@@ -896,6 +907,8 @@ to_fp32_nc_cuda_t ggml_get_to_fp32_nc_cuda(ggml_type type) {
             return convert_unary_cuda<nv_bfloat16, float>;
         case GGML_TYPE_TQ3_KV:
             return dequantize_block_cuda<QK_TQ3_KV, QR_TQ3_KV, dequantize_tq3_kv>;
+        case GGML_TYPE_TURBO3_0:
+            return dequantize_block_cuda<QK_TURBO3, QR_TURBO3, dequantize_turbo3_0>;
         default:
             return nullptr;
     }

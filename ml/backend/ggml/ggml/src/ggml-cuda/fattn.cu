@@ -1,4 +1,5 @@
 #include "common.cuh"
+#include "convert.cuh"
 #include "fattn-common.cuh"
 #include "fattn-mma-f16.cuh"
 #include "fattn-tile.cuh"
@@ -201,6 +202,10 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ4_0, GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0_WHT, GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ4_0_WHT, GGML_TYPE_F16)
+
+    // TurboQuant: always available (not gated by FA_ALL_QUANTS)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
 #else
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0)
@@ -212,6 +217,10 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ4_0_WHT, GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0_WHT, GGML_TYPE_TQ3_0_WHT)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ4_0_WHT, GGML_TYPE_TQ4_0_WHT)
+
+    // TurboQuant: always available (not gated by FA_ALL_QUANTS)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
     GGML_ABORT("fatal error");
@@ -280,7 +289,8 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         // TQ types always use F16 V, allow this mismatch
         if (!(K->type == GGML_TYPE_TQ3_0 || K->type == GGML_TYPE_TQ4_0 ||
               K->type == GGML_TYPE_TQ3_0_WHT || K->type == GGML_TYPE_TQ4_0_WHT ||
-              K->type == GGML_TYPE_TQ3_KV)) {
+              K->type == GGML_TYPE_TQ3_KV ||
+              K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0)) {
             return BEST_FATTN_KERNEL_NONE;
         }
     }
@@ -301,6 +311,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             break;
         case GGML_TYPE_TQ3_0:
         case GGML_TYPE_TQ4_0:
+            break;
+        case GGML_TYPE_TURBO3_0:
+        case GGML_TYPE_TURBO4_0:
             break;
         case GGML_TYPE_TQ3_0_WHT:
         case GGML_TYPE_TQ4_0_WHT:
@@ -384,9 +397,95 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     return BEST_FATTN_KERNEL_TILE;
 }
 
+/* Dequantize a turbo KV tensor to fp16 in a temporary CUDA buffer */
+static half * turbo_dequant_to_fp16(ggml_backend_cuda_context & ctx, const ggml_tensor * src) {
+    const int64_t ne = ggml_nelements(src);
+    half * buf = nullptr;
+    cudaMalloc(&buf, ne * sizeof(half));
+    if (!buf) return nullptr;
+
+    cudaStream_t stream = ctx.stream();
+    to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(src->type);
+    GGML_ASSERT(to_fp16 != nullptr);
+    to_fp16(src->data, buf, ne, stream);
+    return buf;
+}
+
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
-    switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+
+    ggml_tensor * K = dst->src[1];
+    ggml_tensor * V = dst->src[2];
+    const bool is_turbo = (K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0);
+
+    auto best = ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst);
+
+    /* For turbo types: VEC kernel can handle them natively.
+     * For MMA/TILE/WMMA, dequantize KV to fp16 first. */
+    if (is_turbo && best != BEST_FATTN_KERNEL_VEC) {
+        half * K_fp16 = turbo_dequant_to_fp16(ctx, K);
+        half * V_fp16 = (V == K) ? K_fp16 : turbo_dequant_to_fp16(ctx, V);
+
+        if (K_fp16 && V_fp16) {
+            void * K_data_orig = K->data;
+            void * V_data_orig = V->data;
+            ggml_type K_type_orig = K->type;
+            ggml_type V_type_orig = V->type;
+            int64_t K_nb[4], V_nb[4];
+            memcpy(K_nb, K->nb, sizeof(K_nb));
+            if (V != K) memcpy(V_nb, V->nb, sizeof(V_nb));
+
+            K->data = K_fp16;
+            K->type = GGML_TYPE_F16;
+            K->nb[0] = sizeof(half);
+            K->nb[1] = K->ne[0] * sizeof(half);
+            K->nb[2] = K->nb[1] * K->ne[1];
+            K->nb[3] = K->nb[2] * K->ne[2];
+
+            if (V != K) {
+                V->data = V_fp16;
+                V->type = GGML_TYPE_F16;
+                V->nb[0] = sizeof(half);
+                V->nb[1] = V->ne[0] * sizeof(half);
+                V->nb[2] = V->nb[1] * V->ne[1];
+                V->nb[3] = V->nb[2] * V->ne[2];
+            }
+
+            /* Re-evaluate best kernel now that types are fp16 */
+            best = ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst);
+            switch (best) {
+                case BEST_FATTN_KERNEL_MMA_F16:
+                    ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+                    break;
+                case BEST_FATTN_KERNEL_TILE:
+                    ggml_cuda_flash_attn_ext_tile(ctx, dst);
+                    break;
+                case BEST_FATTN_KERNEL_WMMA_F16:
+                    ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst);
+                    break;
+                case BEST_FATTN_KERNEL_VEC:
+                    ggml_cuda_flash_attn_ext_vec(ctx, dst);
+                    break;
+                default:
+                    GGML_ABORT("no FA kernel for turbo dequant path");
+            }
+
+            /* Restore original tensor metadata */
+            K->data = K_data_orig;
+            K->type = K_type_orig;
+            memcpy(K->nb, K_nb, sizeof(K_nb));
+            if (V != K) {
+                V->data = V_data_orig;
+                V->type = V_type_orig;
+                memcpy(V->nb, V_nb, sizeof(V_nb));
+            }
+            if (V_fp16 != K_fp16) cudaFree(V_fp16);
+            cudaFree(K_fp16);
+        }
+        return;
+    }
+
+    switch (best) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
         case BEST_FATTN_KERNEL_TILE:

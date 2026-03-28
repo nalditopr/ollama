@@ -407,6 +407,8 @@ const (
 	DTypeTQ3WHT
 	DTypeTQ4WHT
 	DTypeTQ3KV
+	DTypeTurbo3
+	DTypeTurbo4
 )
 
 type SamplingMode int

@@ -422,8 +422,11 @@ func (t TensorType) BlockSize() uint64 {
 		TensorTypeQ8_1,
 		tensorTypeIQ4_NL,
 		4, TensorTypeMXFP4,
-		TensorTypeTQ3_KV:
+		TensorTypeTQ3_KV,
+		TensorTypeTurbo3_0:
 		return 32
+	case TensorTypeTurbo4_0:
+		return 128
 	default:
 		return 256
 	}
@@ -507,6 +510,10 @@ func (t TensorType) TypeSize() uint64 {
 		return 2 + blockSize/4 + blockSize/8 + blockSize/8 // same block layout as TQ4_0 = 130
 	case TensorTypeTQ3_KV:
 		return blockSize/4 + blockSize/8 + 2 // qs(8) + qr(4) + gamma(2) = 14
+	case TensorTypeTurbo3_0:
+		return 2 + blockSize/4 + blockSize/8 // norm(2) + qs(8) + signs(4) = 14
+	case TensorTypeTurbo4_0:
+		return 4 + blockSize*3/8 + blockSize/8 // norm(2) + rnorm(2) + qs(48) + signs(16) = 68
 	default:
 		return 0
 	}

@@ -89,6 +89,9 @@ typedef sycl::half2 ggml_half2;
 #define QK_K 256
 #define K_SCALE_SIZE 12
 #define QK_TQ3_KV 32
+#define QK_TURBO3 32
+#define QK_TURBO3_GROUP 128
+#define QK_TURBO4 128
 
 #if defined(GGML_COMMON_DECL_CUDA) || defined(GGML_COMMON_DECL_HIP) || defined(GGML_COMMON_DECL_SYCL)
 // QR = QK / number of values before dequantization
@@ -174,6 +177,12 @@ typedef sycl::half2 ggml_half2;
 
 #define QR_TQ3_KV 2   // 2 elements per dequant call (standard for convert.cu)
 #define QI_TQ3_KV (QK_TQ3_KV / (4 * QR_TQ3_KV))  // = 4
+
+#define QR_TURBO3 2   // 2 elements per dequant call
+#define QI_TURBO3 (QK_TURBO3 / (4 * QR_TURBO3))  // = 4
+
+#define QR_TURBO4 2
+#define QI_TURBO4 (QK_TURBO4 / (4 * QR_TURBO4))  // = 16
 
 #endif // GGML_COMMON_DECL_CUDA || GGML_COMMON_DECL_HIP
 
@@ -300,6 +309,26 @@ typedef struct {
     ggml_half gamma;               // scale = amax / 2.1573 = 2 bytes
 } block_tq3_kv;
 static_assert(sizeof(block_tq3_kv) == QK_TQ3_KV/4 + QK_TQ3_KV/8 + sizeof(ggml_half), "wrong tq3_kv block size");
+
+// TurboQuant TURBO3_0: nalditopr 3-bit KV cache (WHT rotation + symmetric centroids)
+// 32 elements per block, 14 bytes = 3.5 bpw
+// 3-bit index split: lower 2 bits in qs[], upper 1 bit in signs[]
+typedef struct {
+    ggml_half  norm;                    //  2 bytes: vector L2 norm (for rescaling)
+    uint8_t    qs[QK_TURBO3 / 4];      //  8 bytes: lower 2-bit indices (4 per byte)
+    uint8_t    signs[QK_TURBO3 / 8];   //  4 bytes: upper 1-bit of 3-bit index (8 per byte)
+} block_turbo3_0;                       // 14 bytes total
+static_assert(sizeof(block_turbo3_0) == sizeof(ggml_half) + QK_TURBO3/4 + QK_TURBO3/8, "wrong turbo3_0 block size/padding");
+
+// TurboQuant TURBO4_0: nalditopr 4-bit KV cache (3-bit PolarQuant + 1-bit QJL)
+// 128 elements per block, 68 bytes = 4.25 bpw
+typedef struct {
+    ggml_half  norm;                    //  2 bytes
+    ggml_half  rnorm;                   //  2 bytes
+    uint8_t    qs[QK_TURBO4 * 3 / 8];  // 48 bytes: 3-bit PolarQuant indices
+    uint8_t    signs[QK_TURBO4 / 8];   // 16 bytes: 1-bit QJL signs
+} block_turbo4_0;                       // 68 bytes total
+static_assert(sizeof(block_turbo4_0) == 2*sizeof(ggml_half) + QK_TURBO4*3/8 + QK_TURBO4/8, "wrong turbo4_0 block size/padding");
 
 //
 // Super-block quantization structures

@@ -248,6 +248,8 @@ const (
 	TensorTypeTQ3_0_WHT
 	TensorTypeTQ4_0_WHT
 	TensorTypeTQ3_KV
+	TensorTypeTurbo3_0
+	TensorTypeTurbo4_0
 )
 
 // ParseTensorType parses the provided GGUF tensor type
@@ -298,6 +300,10 @@ func ParseTensorType(s string) (TensorType, error) {
 		return TensorTypeTQ4_0_WHT, nil
 	case "TQ3_KV":
 		return TensorTypeTQ3_KV, nil
+	case "TURBO3_0":
+		return TensorTypeTurbo3_0, nil
+	case "TURBO4_0":
+		return TensorTypeTurbo4_0, nil
 	default:
 		return 0, fmt.Errorf("unsupported quantization type %s", s)
 	}
@@ -362,6 +368,10 @@ func (t TensorType) String() string {
 		return "TQ4_0_WHT"
 	case TensorTypeTQ3_KV:
 		return "TQ3_KV"
+	case TensorTypeTurbo3_0:
+		return "TURBO3_0"
+	case TensorTypeTurbo4_0:
+		return "TURBO4_0"
 	default:
 		return "unknown"
 	}
