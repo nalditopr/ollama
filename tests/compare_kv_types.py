@@ -55,7 +55,7 @@ def build_niah_prompt(n_filler_words: int) -> tuple[str, str]:
     filler_after = " ".join(filler_words[midpoint:])
 
     prompt = (
-        f"/no_think Read the following document carefully and answer the question at the end.\n\n"
+        f"Read the following document carefully and answer the question at the end.\n\n"
         f"--- DOCUMENT START ---\n"
         f"{filler_before}\n\n"
         f"{NIAH_NEEDLE}\n\n"
@@ -71,43 +71,43 @@ def build_niah_prompt(n_filler_words: int) -> tuple[str, str]:
 TESTS = [
     {
         "name": "math_multiply",
-        "prompt": "/no_think What is 17*23? Reply with just the number.",
+        "prompt": "What is 17*23? Reply with just the number.",
         "expected": "391",
         "category": "factual",
     },
     {
         "name": "math_addition",
-        "prompt": "/no_think What is 847 + 256? Reply with just the number.",
+        "prompt": "What is 847 + 256? Reply with just the number.",
         "expected": "1103",
         "category": "factual",
     },
     {
         "name": "capital_france",
-        "prompt": "/no_think What is the capital of France? Reply with just the city name.",
+        "prompt": "What is the capital of France? Reply with just the city name.",
         "expected": "Paris",
         "category": "factual",
     },
     {
         "name": "capital_japan",
-        "prompt": "/no_think What is the capital of Japan? Reply with just the city name.",
+        "prompt": "What is the capital of Japan? Reply with just the city name.",
         "expected": "Tokyo",
         "category": "factual",
     },
     {
         "name": "code_reverse",
-        "prompt": "/no_think Write a Python one-liner to reverse a string variable s. Reply with just the code.",
+        "prompt": "Write a Python one-liner to reverse a string variable s. Reply with just the code.",
         "expected": "[::-1]",
         "category": "code",
     },
     {
         "name": "code_fizzbuzz",
-        "prompt": '/no_think Write a Python one-liner list comprehension for FizzBuzz from 1 to 15. Reply with just the code.',
+        "prompt": 'Write a Python one-liner list comprehension for FizzBuzz from 1 to 15. Reply with just the code.',
         "expected": "Fizz",
         "category": "code",
     },
     {
         "name": "reasoning",
-        "prompt": "/no_think If all roses are flowers and some flowers fade quickly, can we conclude that some roses fade quickly? Answer Yes or No and explain in one sentence.",
+        "prompt": "If all roses are flowers and some flowers fade quickly, can we conclude that some roses fade quickly? Answer Yes or No and explain in one sentence.",
         "expected": "No",
         "category": "reasoning",
     },
@@ -124,6 +124,7 @@ def query_ollama(model: str, prompt: str, host: str = "http://localhost:11434") 
     payload = json.dumps({
         "model": model,
         "prompt": prompt,
+        "think": False,
         "stream": False,
         "options": {
             "temperature": 0.0,
