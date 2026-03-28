@@ -65,35 +65,25 @@ static __global__ void dequantize_block_turbo3_0(const void * __restrict__ vx, d
 template<typename dst_t>
 static __global__ void dequantize_block_turbo4_0(
         const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
+    constexpr float grid[8] = {
+        1.0f/16.0f, 3.0f/16.0f, 5.0f/16.0f, 7.0f/16.0f,
+        9.0f/16.0f, 11.0f/16.0f, 13.0f/16.0f, 15.0f/16.0f
+    };
     const int64_t i = blockIdx.x;
     const int tid = threadIdx.x;
-
     if (i * QK_TURBO4 >= k) return;
 
     const block_turbo4_0 * x = (const block_turbo4_0 *) vx;
-    const block_turbo4_0 & xb = x[i];
-
-    const float norm  = __half2float(xb.norm);
-    const float rnorm = __half2float(xb.rnorm);
-    const float qjl_scale = TURBO_QJL_CONST / 128.0f * rnorm;
-
+    const float d = __half2float(x[i].d);
     const int base = tid * 4;
     dst_t * out = y + i * QK_TURBO4 + base;
 
-    for (int jj = 0; jj < 4; jj++) {
-        const int j = base + jj;
-        const int bit_offset = j * 3;
-        const int byte_idx = bit_offset / 8;
-        const int bit_pos = bit_offset % 8;
-        uint16_t raw = (uint16_t)xb.qs[byte_idx];
-        if (bit_pos > 5 && byte_idx + 1 < QK_TURBO4 * 3 / 8) {
-            raw |= (uint16_t)xb.qs[byte_idx + 1] << 8;
-        }
-        const int idx = (raw >> bit_pos) & 0x7;
-        const float centroid_val = turbo_centroid_3bit(idx);
-        const int sign_bit = (xb.signs[j / 8] >> (j % 8)) & 1;
-        const float qjl_val = sign_bit ? qjl_scale : -qjl_scale;
-        out[jj] = ggml_cuda_cast<dst_t>((centroid_val + qjl_val) * norm);
+    for (int l = 0; l < 4 && base + l < QK_TURBO4; l++) {
+        const int j = base + l;
+        const uint8_t lo = (x[i].al[j/4] >> ((j%4)*2)) & 0x3;
+        const uint8_t hi = (x[i].ah[j/8] >> (j%8)) & 0x1;
+        const uint8_t s  = (x[i].signs[j/8] >> (j%8)) & 0x1;
+        out[l] = ggml_cuda_cast<dst_t>(d * grid[lo|(hi<<2)] * (1.0f - 2.0f * s));
     }
 }
 
@@ -323,7 +313,7 @@ template<typename dst_t>
 void dequantize_row_turbo4_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
     GGML_ASSERT(k % QK_TURBO4 == 0);
     const int nb = k / QK_TURBO4;
-    dequantize_block_turbo4_0<<<nb, 32, 0, stream>>>(vx, y, k);
+    dequantize_block_turbo4_0<<<nb, 64, 0, stream>>>(vx, y, k); // 256 elems / 4 per thread = 64
 }
 
 /* Explicit template instantiations */

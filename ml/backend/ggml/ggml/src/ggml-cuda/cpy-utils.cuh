@@ -368,6 +368,44 @@ static __device__ void cpy_1_scalar(const char * cxi, char * cdsti) {
     *(dst_t *) cdsti = ggml_cuda_cast<dst_t>(*(const src_t *) cxi);
 }
 
+// TurboQuant 4-bit: 256-element blocks, 3-bit angle + 1-bit sign = 4.0625 bpw
+// From nalditopr/llama-cpp-turboquant tq3-reference-approach branch
+static __device__ void quantize_f32_turbo4_0_block(const float * __restrict__ x, block_turbo4_0 * __restrict__ y) {
+    constexpr float grid[8] = {
+        1.0f/16.0f, 3.0f/16.0f, 5.0f/16.0f, 7.0f/16.0f,
+        9.0f/16.0f, 11.0f/16.0f, 13.0f/16.0f, 15.0f/16.0f
+    };
+
+    float amax = 0.0f;
+    for (int j = 0; j < QK_TURBO4; j++) {
+        float av = fabsf(x[j]);
+        if (av > amax) amax = av;
+    }
+    y->d = __float2half(amax);
+    float inv_d = amax > 0.0f ? 1.0f / amax : 0.0f;
+
+    memset(y->al, 0, QK_TURBO4 / 4);
+    memset(y->ah, 0, QK_TURBO4 / 8);
+    memset(y->signs, 0, QK_TURBO4 / 8);
+
+    for (int j = 0; j < QK_TURBO4; j++) {
+        float normalized = x[j] * inv_d;
+        int best_idx = 0, best_sign = 0;
+        float best_err = 1e30f;
+        #pragma unroll
+        for (int g = 0; g < 8; g++) {
+            float gv = grid[g];
+            float e_pos = (normalized - gv) * (normalized - gv);
+            float e_neg = (normalized + gv) * (normalized + gv);
+            if (e_pos < best_err) { best_err = e_pos; best_idx = g; best_sign = 0; }
+            if (e_neg < best_err) { best_err = e_neg; best_idx = g; best_sign = 1; }
+        }
+        y->al[j / 4] |= (uint8_t)((best_idx & 0x3) << ((j % 4) * 2));
+        if (best_idx & 0x4) y->ah[j / 8] |= (uint8_t)(1 << (j % 8));
+        if (best_sign)       y->signs[j / 8] |= (uint8_t)(1 << (j % 8));
+    }
+}
+
 static __device__ void cpy_1_i32_i32(const char * cxi, char * cdsti) {
     const int32_t * src = (const int32_t *)cxi;
     int32_t * dst = (int32_t *)cdsti;

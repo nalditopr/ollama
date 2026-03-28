@@ -1013,11 +1013,13 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4_0(
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
-    const block_turbo4_0 * K_turbo = (const block_turbo4_0 *) K_c;
+    // turbo4 now uses simple d/al/ah/signs layout (same as TQ4_0)
+    constexpr float grid[8] = {
+        1.0f/16.0f, 3.0f/16.0f, 5.0f/16.0f, 7.0f/16.0f,
+        9.0f/16.0f, 11.0f/16.0f, 13.0f/16.0f, 15.0f/16.0f
+    };
 
-    const float norm     = __half2float(K_turbo[0].norm);
-    const float rnorm    = __half2float(K_turbo[0].rnorm);
-    const float qjl_scale = 1.2533141373155003f / 128.0f * rnorm;
+    const block_turbo4_0 * K_turbo = (const block_turbo4_0 *) K_c;
 
     float sum = 0.0f;
 
@@ -1027,15 +1029,19 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4_0(
         for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; k_KQ_1 += 2) {
             const int k_pair0 = k_KQ_0 + (threadIdx.x % nthreads)*cpy_ne + k_KQ_1;
             const int elem = k_pair0 * 2;
+            const int ib = elem / QK_TURBO4;
+            const int jbase = elem % QK_TURBO4;
+            const float d_k = __half2float(K_turbo[ib].d);
 
             float v[4];
 #pragma unroll
             for (int l = 0; l < 4; l++) {
-                const int j = elem + l;
-                const int idx = turbo4_unpack_3bit(K_turbo[0].qs, j);
-                const int sign_bit = (K_turbo[0].signs[j / 8] >> (j % 8)) & 1;
-                const float qjl_val = sign_bit ? qjl_scale : -qjl_scale;
-                v[l] = (cn[idx] + qjl_val) * norm;
+                const int j = jbase + l;
+                const uint8_t lo = (K_turbo[ib].al[j/4] >> ((j%4)*2)) & 0x3;
+                const uint8_t hi = (K_turbo[ib].ah[j/8] >> (j%8)) & 0x1;
+                const uint8_t idx = lo | (hi << 2);
+                const uint8_t s = (K_turbo[ib].signs[j/8] >> (j%8)) & 0x1;
+                v[l] = d_k * grid[idx] * (1.0f - 2.0f * s);
             }
 
 #ifdef V_DOT2_F32_F16_AVAILABLE
@@ -1061,12 +1067,16 @@ static __device__ __forceinline__ void dequantize_V_turbo4_0(const void * __rest
          0.021460f,  0.065717f,  0.117832f,  0.190685f
     };
 
+    // turbo4 now uses simple d/al/ah/signs layout
+    constexpr float grid[8] = {
+        1.0f/16.0f, 3.0f/16.0f, 5.0f/16.0f, 7.0f/16.0f,
+        9.0f/16.0f, 11.0f/16.0f, 13.0f/16.0f, 15.0f/16.0f
+    };
+
     const block_turbo4_0 * x = (const block_turbo4_0 *) vx;
     const int64_t ib  = i0 / QK_TURBO4;
     const int     iqs = i0 % QK_TURBO4;
-    const float norm     = __half2float(x[ib].norm);
-    const float rnorm    = __half2float(x[ib].rnorm);
-    const float qjl_scale = 1.2533141373155003f / 128.0f * rnorm;
+    const float d = __half2float(x[ib].d);
 
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same<T, half>::value) {
@@ -1074,15 +1084,14 @@ static __device__ __forceinline__ void dequantize_V_turbo4_0(const void * __rest
         for (int l0 = 0; l0 < ne; l0 += 2) {
             const int j0 = iqs + l0;
             const int j1 = j0 + 1;
-
-            const int idx0 = turbo4_unpack_3bit(x[ib].qs, j0);
-            const int s0   = (x[ib].signs[j0 / 8] >> (j0 % 8)) & 1;
-            const float f0 = (cn[idx0] + (s0 ? qjl_scale : -qjl_scale)) * norm;
-
-            const int idx1 = turbo4_unpack_3bit(x[ib].qs, j1);
-            const int s1   = (x[ib].signs[j1 / 8] >> (j1 % 8)) & 1;
-            const float f1 = (cn[idx1] + (s1 ? qjl_scale : -qjl_scale)) * norm;
-
+            const uint8_t lo0 = (x[ib].al[j0/4] >> ((j0%4)*2)) & 0x3;
+            const uint8_t hi0 = (x[ib].ah[j0/8] >> (j0%8)) & 0x1;
+            const uint8_t s0  = (x[ib].signs[j0/8] >> (j0%8)) & 0x1;
+            const uint8_t lo1 = (x[ib].al[j1/4] >> ((j1%4)*2)) & 0x3;
+            const uint8_t hi1 = (x[ib].ah[j1/8] >> (j1%8)) & 0x1;
+            const uint8_t s1  = (x[ib].signs[j1/8] >> (j1%8)) & 0x1;
+            const float f0 = d * grid[lo0|(hi0<<2)] * (1.0f - 2.0f * s0);
+            const float f1 = d * grid[lo1|(hi1<<2)] * (1.0f - 2.0f * s1);
             ((half2 *) dst)[l0/2] = make_half2(__float2half(f0), __float2half(f1));
         }
     } else
@@ -1091,9 +1100,10 @@ static __device__ __forceinline__ void dequantize_V_turbo4_0(const void * __rest
 #pragma unroll
         for (int l = 0; l < ne; ++l) {
             const int j = iqs + l;
-            const int idx = turbo4_unpack_3bit(x[ib].qs, j);
-            const int s   = (x[ib].signs[j / 8] >> (j % 8)) & 1;
-            ((float *) dst)[l] = (cn[idx] + (s ? qjl_scale : -qjl_scale)) * norm;
+            const uint8_t lo = (x[ib].al[j/4] >> ((j%4)*2)) & 0x3;
+            const uint8_t hi = (x[ib].ah[j/8] >> (j%8)) & 0x1;
+            const uint8_t s  = (x[ib].signs[j/8] >> (j%8)) & 0x1;
+            ((float *) dst)[l] = d * grid[lo|(hi<<2)] * (1.0f - 2.0f * s);
         }
     } else {
         static_assert(std::is_same_v<T, void>, "unsupported type");
