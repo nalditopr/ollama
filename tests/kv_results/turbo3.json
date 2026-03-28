@@ -1,0 +1,93 @@
+{
+  "label": "turbo3",
+  "model": "qwen3.5:35b-a3b",
+  "timestamp": "2026-03-28 10:42:10",
+  "tests": [
+    {
+      "name": "math_multiply",
+      "category": "factual",
+      "passed": false,
+      "latency_s": 7.932,
+      "expected": "391",
+      "response_preview": ""
+    },
+    {
+      "name": "math_addition",
+      "category": "factual",
+      "passed": false,
+      "latency_s": 2.154,
+      "expected": "1103",
+      "response_preview": ""
+    },
+    {
+      "name": "capital_france",
+      "category": "factual",
+      "passed": true,
+      "latency_s": 2.155,
+      "expected": "Paris",
+      "response_preview": "Paris"
+    },
+    {
+      "name": "capital_japan",
+      "category": "factual",
+      "passed": true,
+      "latency_s": 1.831,
+      "expected": "Tokyo",
+      "response_preview": "Tokyo"
+    },
+    {
+      "name": "code_reverse",
+      "category": "code",
+      "passed": false,
+      "latency_s": 2.146,
+      "expected": "[::-1]",
+      "response_preview": ""
+    },
+    {
+      "name": "code_fizzbuzz",
+      "category": "code",
+      "passed": false,
+      "latency_s": 2.144,
+      "expected": "Fizz",
+      "response_preview": ""
+    },
+    {
+      "name": "reasoning",
+      "category": "reasoning",
+      "passed": false,
+      "latency_s": 2.132,
+      "expected": "No",
+      "response_preview": ""
+    },
+    {
+      "name": "niah_100",
+      "category": "niah",
+      "passed": false,
+      "latency_s": 2.211,
+      "expected": "QUANTUM-DOLPHIN-42",
+      "response_preview": ""
+    },
+    {
+      "name": "niah_500",
+      "category": "niah",
+      "passed": false,
+      "latency_s": 2.35,
+      "expected": "QUANTUM-DOLPHIN-42",
+      "response_preview": ""
+    },
+    {
+      "name": "niah_1000",
+      "category": "niah",
+      "passed": false,
+      "latency_s": 2.554,
+      "expected": "QUANTUM-DOLPHIN-42",
+      "response_preview": ""
+    }
+  ],
+  "summary": {
+    "total": 10,
+    "passed": 2,
+    "failed": 8,
+    "pass_rate": 20.0
+  }
+}
