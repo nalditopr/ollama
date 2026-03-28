@@ -1,5 +1,7 @@
 .vscode
 ollama
+ollama.exe
+ollama.exe~
 app
 macapp
 dist
@@ -8,4 +10,11 @@ build
 .cache
 test_data
 .git
+models/
+*.obj
+*.log
+*.exe
+Modelfile.*
+tests/kv_results/
+D:/
 
