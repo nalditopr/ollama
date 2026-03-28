@@ -19,8 +19,9 @@ ENV CGO_ENABLED=1
 WORKDIR /src
 COPY . .
 
-# Ollama build: cmake configures into 'build', then go build embeds the libs
-RUN cmake -B build && \
+# Ollama build: cmake with full CUDA arch support including Blackwell (SM 120)
+RUN cmake -B build \
+        -DCMAKE_CUDA_ARCHITECTURES="50;52;60;61;70;75;80;86;89;90;120" && \
     cmake --build build --config Release -j$(nproc) && \
     go build -o ollama .
 
