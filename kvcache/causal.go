@@ -195,6 +195,11 @@ func (c *Causal) Close() {
 	}
 }
 
+func (c *Causal) NeedsWHTInverse() bool {
+	return c.DType == ml.DTypeTQ3WHT || c.DType == ml.DTypeTQ4WHT ||
+		c.DType == ml.DTypeTQ3KV || c.DType == ml.DTypeTurbo3 || c.DType == ml.DTypeTurbo4
+}
+
 func (c *Causal) StartForward(ctx ml.Context, batch input.Batch, reserve bool) error {
 	c.curBatchSize = len(batch.Positions)
 	c.curSequences = batch.Sequences

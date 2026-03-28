@@ -9948,6 +9948,80 @@ void ggml_compute_forward_solve_tri(const struct ggml_compute_params * params, s
     }
 }
 
+// ggml_compute_forward_turbo_wht
+
+static void turbo3_inverse_wht32_cpu(float * data) {
+    static const int8_t signs[32] = {
+        +1,-1,+1,+1,-1,-1,+1,-1,+1,+1,-1,+1,-1,+1,-1,-1,
+        +1,-1,-1,+1,+1,-1,+1,-1,-1,+1,+1,+1,-1,-1,+1,-1
+    };
+    // 5-stage butterfly
+    for (int step = 1; step < 32; step <<= 1) {
+        for (int i = 0; i < 32; i += step * 2) {
+            for (int j = i; j < i + step; j++) {
+                float a = data[j], b = data[j + step];
+                data[j] = a + b; data[j + step] = a - b;
+            }
+        }
+    }
+    // Normalize and undo signs: 1/sqrt(32) = 0.17677669529663688
+    for (int j = 0; j < 32; j++) {
+        data[j] *= 0.17677669529663688f * signs[j];
+    }
+}
+
+static void turbo3_forward_wht32_cpu(float * data) {
+    static const int8_t signs[32] = {
+        +1,-1,+1,+1,-1,-1,+1,-1,+1,+1,-1,+1,-1,+1,-1,-1,
+        +1,-1,-1,+1,+1,-1,+1,-1,-1,+1,+1,+1,-1,-1,+1,-1
+    };
+    // Apply signs and normalize: 1/sqrt(32) = 0.17677669529663688
+    for (int j = 0; j < 32; j++) {
+        data[j] *= 0.17677669529663688f * signs[j];
+    }
+    // 5-stage butterfly
+    for (int step = 16; step >= 1; step >>= 1) {
+        for (int i = 0; i < 32; i += step * 2) {
+            for (int j = i; j < i + step; j++) {
+                float a = data[j], b = data[j + step];
+                data[j] = a + b; data[j + step] = a - b;
+            }
+        }
+    }
+}
+
+void ggml_compute_forward_turbo_wht(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    if (params->ith != 0) {
+        return;
+    }
+
+    int direction;
+    memcpy(&direction, dst->op_params, sizeof(int));
+
+    float * data = (float *) dst->data;
+    const float * src = (const float *) dst->src[0]->data;
+    int64_t ne = ggml_nelements(dst);
+
+    if (src != data) {
+        memcpy(data, src, ne * sizeof(float));
+    }
+
+    if (direction == 1) {
+        // Inverse WHT
+        for (int64_t i = 0; i < ne; i += 32) {
+            turbo3_inverse_wht32_cpu(data + i);
+        }
+    } else {
+        // Forward WHT
+        for (int64_t i = 0; i < ne; i += 32) {
+            turbo3_forward_wht32_cpu(data + i);
+        }
+    }
+}
+
 // ggml_compute_forward_rwkv_wkv7
 
 static void ggml_compute_forward_rwkv_wkv7_f32(

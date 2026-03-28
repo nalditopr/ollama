@@ -238,6 +238,11 @@ type Tensor interface {
 	SolveTri(ctx Context, b Tensor, lower, left, unitDiag bool) Tensor
 
 	Interpolate(ctx Context, dims [4]int, samplingMode SamplingMode) Tensor
+
+	// WHT applies the Walsh-Hadamard Transform. If inverse is true, applies
+	// the inverse transform (used to undo WHT rotation on attention output
+	// when using turbo KV cache quantization).
+	WHT(ctx Context, inverse bool) Tensor
 }
 
 // ScaledDotProductAttention implements a fused attention

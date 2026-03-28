@@ -551,6 +551,10 @@ func (c *Recurrent) Remove(seq int, beginIndex, endIndex int32) error {
 	return nil
 }
 
+func (c *Recurrent) NeedsWHTInverse() bool {
+	return false
+}
+
 func (c *Recurrent) validSlot(slot int) bool {
 	return slot >= 0 && slot < len(c.refCount)
 }

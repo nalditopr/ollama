@@ -57,9 +57,10 @@ func AttentionWithVMLA(ctx ml.Context, query, key, value, sinks ml.Tensor, vmla 
 		key, value, mask = cache.Get(ctx)
 	}
 
+	var result ml.Tensor
 	if sdpa, ok := query.(ml.ScaledDotProductAttention); ok {
 		cacheConfigApplied := cache != nil
-		return sdpa.ScaledDotProductAttention(ctx, key, value, mask, sinks, vmla, scale, cacheConfigApplied)
+		result = sdpa.ScaledDotProductAttention(ctx, key, value, mask, sinks, vmla, scale, cacheConfigApplied)
 	} else {
 		query = query.Permute(ctx, 0, 2, 1, 3)
 		key = key.Permute(ctx, 0, 2, 1, 3)
@@ -79,6 +80,14 @@ func AttentionWithVMLA(ctx ml.Context, query, key, value, sinks ml.Tensor, vmla 
 			kqv = vmla.Mulmat(ctx, kqv)
 		}
 
-		return kqv.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx)
+		result = kqv.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx)
 	}
+
+	// Apply inverse WHT to undo the forward WHT rotation applied during
+	// turbo KV cache quantization
+	if cache != nil && cache.NeedsWHTInverse() {
+		result = result.WHT(ctx, true)
+	}
+
+	return result
 }

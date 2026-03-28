@@ -422,13 +422,27 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_4_8 = 37,
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
-        GGML_TYPE_TQ3_0   = 40, // TurboQuant 3-bit (PolarQuant + QJL)
-        GGML_TYPE_TQ4_0   = 41, // TurboQuant 4-bit (PolarQuant + QJL)
-        GGML_TYPE_TQ3_0_WHT = 42, // TurboQuant 3-bit with WHT rotation
-        GGML_TYPE_TQ4_0_WHT = 43, // TurboQuant 4-bit with WHT rotation
-        GGML_TYPE_TQ3_KV    = 44, // TurboQuant 3-bit KV cache (animehacker WHT + symmetric centroids)
-        GGML_TYPE_TURBO3_0  = 45, // TurboQuant 3-bit KV cache: 2-bit PolarQuant + 1-bit QJL (nalditopr)
-        GGML_TYPE_TURBO4_0  = 46, // TurboQuant 4-bit KV cache: 3-bit PolarQuant + 1-bit QJL (nalditopr)
+        // TurboQuant types - KV cache quantization for reduced VRAM usage
+        //
+        // Production-ready (decode path):
+        //   TQ3_KV   (44) - animehacker WHT + symmetric centroids. Working NIAH, FA disabled. Best for decode.
+        //   TURBO3_0 (45) - nalditopr 2-bit PolarQuant + 1-bit QJL. FA enabled, fastest throughput. Preferred.
+        //
+        // Experimental:
+        //   TQ3_0     (40) - Weight quantization only, NOT for KV cache. PolarQuant + QJL.
+        //   TQ4_0     (41) - Weight quantization only, NOT for KV cache. PolarQuant + QJL.
+        //   TQ3_0_WHT (42) - Early WHT attempt (QK_K=256 blocks). Superseded by TQ3_KV / TURBO3_0.
+        //   TQ4_0_WHT (43) - Early WHT attempt. Superseded by TURBO3_0 / TURBO4_0.
+        //   TURBO4_0  (46) - 4-bit variant. Needs turbo4 quantize kernel, not yet complete.
+        //
+        // Do NOT remove any types - backward compatibility with existing GGUF files.
+        GGML_TYPE_TQ3_0   = 40, // [experimental] weight quant only, not for KV cache
+        GGML_TYPE_TQ4_0   = 41, // [experimental] weight quant only, not for KV cache
+        GGML_TYPE_TQ3_0_WHT = 42, // [experimental] superseded by TQ3_KV / TURBO3_0
+        GGML_TYPE_TQ4_0_WHT = 43, // [experimental] superseded by TURBO3_0 / TURBO4_0
+        GGML_TYPE_TQ3_KV    = 44, // [production] animehacker WHT + symmetric centroids, FA disabled
+        GGML_TYPE_TURBO3_0  = 45, // [production] nalditopr 2-bit PQ + 1-bit QJL, FA enabled
+        GGML_TYPE_TURBO4_0  = 46, // [experimental] 4-bit variant, needs turbo4 quantize kernel
         GGML_TYPE_COUNT   = 47,
     };
 

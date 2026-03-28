@@ -1915,6 +1915,17 @@ func (t *Tensor) Interpolate(ctx ml.Context, dims [4]int, samplingMode ml.Sampli
 	}
 }
 
+func (t *Tensor) WHT(ctx ml.Context, inverse bool) ml.Tensor {
+	direction := C.int(0)
+	if inverse {
+		direction = C.int(1)
+	}
+	return &Tensor{
+		b: t.b,
+		t: C.ggml_turbo_wht(ctx.(*Context).ctx, t.t, direction),
+	}
+}
+
 // Slice returns a view of the tensor sliced along dim from low to high in step steps.
 // Slice panics if the dimension is invalid or the slice parameters are out of range.
 // If dim=0 and step>1, the tensor is a copy rather than a view to ensure proper shape.
