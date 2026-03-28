@@ -3,7 +3,7 @@
 # Produces a minimal runtime image with ollama binary + CUDA libs
 
 # Stage 1: Build
-FROM nvidia/cuda:12.8.0-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS builder
 
 ARG GO_VERSION=1.26.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -21,12 +21,12 @@ COPY . .
 
 # Ollama build: cmake with full CUDA arch support including Blackwell (SM 120)
 RUN cmake -B build \
-        -DCMAKE_CUDA_ARCHITECTURES="50;52;60;61;70;75;80;86;89;90;120" && \
+        -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;120" && \
     cmake --build build --config Release -j$(nproc) && \
     go build -o ollama .
 
 # Stage 2: Runtime
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+FROM nvidia/cuda:13.1.0-runtime-ubuntu24.04
 
 COPY --from=builder /src/ollama /usr/local/bin/ollama
 COPY --from=builder /src/build/lib/ollama/ /usr/local/lib/ollama/
