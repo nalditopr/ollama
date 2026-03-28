@@ -64,7 +64,8 @@ static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
 enum mmvq_parameter_table_id {
     MMVQ_PARAMETERS_GENERIC = 0,
     MMVQ_PARAMETERS_GCN,
-    MMVQ_PARAMETERS_RDNA2
+    MMVQ_PARAMETERS_RDNA2,
+    MMVQ_PARAMETERS_BLACKWELL
 };
 
 static constexpr __device__ mmvq_parameter_table_id get_device_table_id() {
@@ -72,6 +73,8 @@ static constexpr __device__ mmvq_parameter_table_id get_device_table_id() {
     return MMVQ_PARAMETERS_RDNA2;
 #elif defined(GCN) || defined(CDNA)
     return MMVQ_PARAMETERS_GCN;
+#elif __CUDA_ARCH__ >= 1200
+    return MMVQ_PARAMETERS_BLACKWELL;
 #else
     return MMVQ_PARAMETERS_GENERIC;
 #endif
@@ -84,11 +87,32 @@ static __host__ mmvq_parameter_table_id get_device_table_id(int cc) {
     if (GGML_CUDA_CC_IS_GCN(cc) || GGML_CUDA_CC_IS_CDNA(cc)) {
         return MMVQ_PARAMETERS_GCN;
     }
+    if (GGML_CUDA_CC_IS_BLACKWELL(cc)) {
+        return MMVQ_PARAMETERS_BLACKWELL;
+    }
     return MMVQ_PARAMETERS_GENERIC;
 }
 
 static constexpr __host__ __device__ int calc_nwarps(int ncols_dst, mmvq_parameter_table_id table_id) {
-    if (table_id == MMVQ_PARAMETERS_GENERIC) {
+    if (table_id == MMVQ_PARAMETERS_BLACKWELL) {
+        // Blackwell (SM 12.0): 128 CUDA cores/SM, wider SIMD, 36MB L2 cache.
+        // Use 8 warps (256 threads) for low column counts to maximize throughput.
+        switch (ncols_dst) {
+            case 1:
+            case 2:
+                return 8;
+            case 3:
+            case 4:
+                return 4;
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+                return 2;
+            default:
+                return 1;
+        }
+    } else if (table_id == MMVQ_PARAMETERS_GENERIC) {
         switch (ncols_dst) {
             case 1:
             case 2:
@@ -122,7 +146,23 @@ static constexpr __host__ __device__ int calc_nwarps(int ncols_dst, mmvq_paramet
 }
 
 static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int table_id) {
-    if (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_GCN) {
+    if (table_id == MMVQ_PARAMETERS_BLACKWELL) {
+        // Blackwell: with more warps per block, process more rows per block for better L2 reuse.
+        switch (ncols_dst) {
+            case 1:
+                return 2;
+            case 2:
+            case 3:
+            case 4:
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+                return 2;
+            default:
+                return 1;
+        }
+    } else if (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_GCN) {
         switch (ncols_dst) {
             case 1:
                 return 1;

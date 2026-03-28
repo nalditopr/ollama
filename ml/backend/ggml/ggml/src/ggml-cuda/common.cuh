@@ -85,9 +85,11 @@ static cudaError_t cudaMemsetAsyncReserve ( void* devPtr, int value, size_t coun
 #define GGML_CUDA_CC_TURING          750
 #define GGML_CUDA_CC_AMPERE          800
 #define GGML_CUDA_CC_ADA_LOVELACE    890
+#define GGML_CUDA_CC_BLACKWELL      1200 // RTX 5090/5080, SM 12.0 (Blackwell), 128 CUDA cores/SM, 36MB L2
 #define GGML_CUDA_CC_OFFSET_AMD      0x1000000
 #define GGML_CUDA_CC_OFFSET_MTHREADS 0x0100000
 #define GGML_CUDA_CC_IS_NVIDIA(cc)   (cc < GGML_CUDA_CC_OFFSET_MTHREADS)
+#define GGML_CUDA_CC_IS_BLACKWELL(cc) (GGML_CUDA_CC_IS_NVIDIA(cc) && (cc) >= GGML_CUDA_CC_BLACKWELL && (cc) < 1300)
 
 // AMD
 // GCN/CDNA, wave size is 64

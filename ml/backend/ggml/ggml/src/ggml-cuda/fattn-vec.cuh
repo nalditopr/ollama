@@ -2,12 +2,19 @@
 #include "fattn-common.cuh"
 
 static int ggml_cuda_fattn_vec_get_nthreads_host(const int cc) {
+    // Blackwell (SM 12.0) has 128 CUDA cores/SM with wider SIMD — 256 threads improves occupancy
+    if (GGML_CUDA_CC_IS_BLACKWELL(cc)) {
+        return 256;
+    }
     return 128;
-    GGML_UNUSED(cc);
 }
 
 static constexpr __device__ int ggml_cuda_fattn_vec_get_nthreads_device() {
+#if __CUDA_ARCH__ >= 1200
+    return 256;
+#else
     return 128;
+#endif
 }
 
 // Currenlty llvm with the amdgcn target dose not support unrolling loops
