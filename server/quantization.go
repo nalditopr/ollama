@@ -120,7 +120,13 @@ func getTensorNewType(kv fsggml.KV, qs *quantizeState, newType fsggml.TensorType
 			newType = fsggml.TensorTypeQ6_K
 		}
 	} else if strings.Contains(name, "attn_v.weight") {
-		if (ftype == fsggml.FileTypeQ4_K_M) &&
+		if ftype == fsggml.FileTypeTQ3_0 {
+			// TQ3_0: bump value projections to TQ4_0 for better quality
+			newType = fsggml.TensorTypeTQ4_0
+		} else if ftype == fsggml.FileTypeTQ4_0 {
+			// TQ4_0: bump value projections to Q6_K for better quality
+			newType = fsggml.TensorTypeQ6_K
+		} else if (ftype == fsggml.FileTypeQ4_K_M) &&
 			useMoreBits(qs.iAttnV, qs.nAttnV) {
 			newType = fsggml.TensorTypeQ6_K
 		} else if ftype == fsggml.FileTypeQ4_K_S && qs.iAttnV < 4 {
@@ -155,7 +161,17 @@ func getTensorNewType(kv fsggml.KV, qs *quantizeState, newType fsggml.TensorType
 	} else if strings.Contains(name, "ffn_down") {
 		iLayer := qs.iFfnDown
 		n_layer := qs.nFfnDown
-		if ftype == fsggml.FileTypeQ4_K_M {
+		if ftype == fsggml.FileTypeTQ3_0 {
+			// TQ3_0: bump first/last layer ffn_down to TQ4_0 for quality
+			if useMoreBits(iLayer, n_layer) {
+				newType = fsggml.TensorTypeTQ4_0
+			}
+		} else if ftype == fsggml.FileTypeTQ4_0 {
+			// TQ4_0: bump first/last layer ffn_down to Q6_K for quality
+			if useMoreBits(iLayer, n_layer) {
+				newType = fsggml.TensorTypeQ6_K
+			}
+		} else if ftype == fsggml.FileTypeQ4_K_M {
 			if useMoreBits(iLayer, n_layer) {
 				newType = fsggml.TensorTypeQ6_K
 			}
@@ -192,6 +208,10 @@ func getTensorNewType(kv fsggml.KV, qs *quantizeState, newType fsggml.TensorType
 				newType = fsggml.TensorTypeQ5_1
 			case fsggml.TensorTypeQ6_K:
 				newType = fsggml.TensorTypeQ8_0
+			case fsggml.TensorTypeTQ3_0:
+				newType = fsggml.TensorTypeQ4_0
+			case fsggml.TensorTypeTQ4_0:
+				newType = fsggml.TensorTypeQ5_0
 			}
 
 			// Final check - if still incompatible, fall back to F16

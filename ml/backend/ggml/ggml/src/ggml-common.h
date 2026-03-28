@@ -159,6 +159,12 @@ typedef sycl::half2 ggml_half2;
 #define QI3_S (QK_K / (4*QR3_S))
 #define QR3_S 4
 
+#define QI_TQ3_0 (QK_K / (4*QR_TQ3_0))
+#define QR_TQ3_0 4
+
+#define QI_TQ4_0 (QK_K / (4*QR_TQ4_0))
+#define QR_TQ4_0 2
+
 #endif // GGML_COMMON_DECL_CUDA || GGML_COMMON_DECL_HIP
 
 #ifdef _MSC_VER
@@ -254,6 +260,27 @@ typedef struct {
     ggml_half d;
 } block_tq2_0;
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
+
+//
+// TurboQuant: PolarQuant (angular grid) + QJL (1-bit sign correction)
+//
+
+// 3.0625 bpw (2-bit angle index + 1-bit QJL sign)
+typedef struct {
+    ggml_half d;              // super-block radius (norm scale)
+    uint8_t   al[QK_K / 4];  // 2-bit angle grid indices, packed 4 per byte
+    uint8_t   signs[QK_K / 8]; // 1-bit QJL sign corrections, packed 8 per byte
+} block_tq3_0;
+static_assert(sizeof(block_tq3_0) == sizeof(ggml_half) + QK_K/4 + QK_K/8, "wrong tq3_0 block size/padding");
+
+// 4.0625 bpw (3-bit angle index [2 lo + 1 hi] + 1-bit QJL sign)
+typedef struct {
+    ggml_half d;              // super-block radius (norm scale)
+    uint8_t   al[QK_K / 4];  // 2-bit angle grid indices (low bits), packed 4 per byte
+    uint8_t   ah[QK_K / 8];  // 1-bit angle grid index (high bit), packed 8 per byte
+    uint8_t   signs[QK_K / 8]; // 1-bit QJL sign corrections, packed 8 per byte
+} block_tq4_0;
+static_assert(sizeof(block_tq4_0) == sizeof(ggml_half) + QK_K/4 + QK_K/8 + QK_K/8, "wrong tq4_0 block size/padding");
 
 //
 // Super-block quantization structures

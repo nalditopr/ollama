@@ -75,3 +75,56 @@ static __device__ __forceinline__ void dequantize_q8_0(const void * vx, const in
     v.x *= d;
     v.y *= d;
 }
+
+__device__ static const float TQ_GRID_4[4] = {
+    1.0f/8.0f, 3.0f/8.0f, 5.0f/8.0f, 7.0f/8.0f,
+};
+
+__device__ static const float TQ_GRID_8[8] = {
+    1.0f/16.0f, 3.0f/16.0f, 5.0f/16.0f, 7.0f/16.0f,
+    9.0f/16.0f, 11.0f/16.0f, 13.0f/16.0f, 15.0f/16.0f,
+};
+
+static __device__ __forceinline__ void dequantize_tq3_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_tq3_0 * x = (const block_tq3_0 *) vx;
+    const float d = __half2float(x[ib].d);
+
+    // iqs indexes 2 consecutive elements
+    const int j0 = iqs * 2;
+    const int j1 = j0 + 1;
+
+    // Extract 2-bit angle indices
+    const uint8_t a0 = (x[ib].al[j0/4] >> ((j0%4)*2)) & 0x3;
+    const uint8_t a1 = (x[ib].al[j1/4] >> ((j1%4)*2)) & 0x3;
+
+    // Extract sign bits
+    const uint8_t s0 = (x[ib].signs[j0/8] >> (j0%8)) & 0x1;
+    const uint8_t s1 = (x[ib].signs[j1/8] >> (j1%8)) & 0x1;
+
+    v.x = d * TQ_GRID_4[a0] * (1.0f - 2.0f * s0);
+    v.y = d * TQ_GRID_4[a1] * (1.0f - 2.0f * s1);
+}
+
+static __device__ __forceinline__ void dequantize_tq4_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_tq4_0 * x = (const block_tq4_0 *) vx;
+    const float d = __half2float(x[ib].d);
+
+    const int j0 = iqs * 2;
+    const int j1 = j0 + 1;
+
+    // Extract 3-bit angle indices (2-bit lo + 1-bit hi)
+    const uint8_t lo0 = (x[ib].al[j0/4] >> ((j0%4)*2)) & 0x3;
+    const uint8_t hi0 = (x[ib].ah[j0/8] >> (j0%8)) & 0x1;
+    const uint8_t lo1 = (x[ib].al[j1/4] >> ((j1%4)*2)) & 0x3;
+    const uint8_t hi1 = (x[ib].ah[j1/8] >> (j1%8)) & 0x1;
+
+    const uint8_t idx0 = lo0 | (hi0 << 2);
+    const uint8_t idx1 = lo1 | (hi1 << 2);
+
+    // Extract sign bits
+    const uint8_t s0 = (x[ib].signs[j0/8] >> (j0%8)) & 0x1;
+    const uint8_t s1 = (x[ib].signs[j1/8] >> (j1%8)) & 0x1;
+
+    v.x = d * TQ_GRID_8[idx0] * (1.0f - 2.0f * s0);
+    v.y = d * TQ_GRID_8[idx1] * (1.0f - 2.0f * s1);
+}

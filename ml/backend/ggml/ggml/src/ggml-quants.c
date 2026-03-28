@@ -2270,6 +2270,179 @@ void dequantize_row_tq2_0(const block_tq2_0 * GGML_RESTRICT x, float * GGML_REST
     }
 }
 
+// ====================== TurboQuant (PolarQuant + QJL) (de)-quantization
+
+// Uniform grid lookup tables for amax-normalized quantization
+// 4 uniformly-spaced centroids in [0, 1] for TQ3_0 (2-bit index, sign bit gives 8 effective levels)
+static const float TQ_POLAR_GRID_4[4] = {
+    1.0f/8.0f,   // 0.125  — centroid of [0, 1/4)
+    3.0f/8.0f,   // 0.375  — centroid of [1/4, 2/4)
+    5.0f/8.0f,   // 0.625  — centroid of [2/4, 3/4)
+    7.0f/8.0f,   // 0.875  — centroid of [3/4, 1]
+};
+
+// 8 uniformly-spaced centroids in [0, 1] for TQ4_0 (3-bit index, sign bit gives 16 effective levels)
+static const float TQ_POLAR_GRID_8[8] = {
+    1.0f/16.0f,   // 0.0625  — centroid of [0, 1/8)
+    3.0f/16.0f,   // 0.1875  — centroid of [1/8, 2/8)
+    5.0f/16.0f,   // 0.3125  — centroid of [2/8, 3/8)
+    7.0f/16.0f,   // 0.4375  — centroid of [3/8, 4/8)
+    9.0f/16.0f,   // 0.5625  — centroid of [4/8, 5/8)
+    11.0f/16.0f,  // 0.6875  — centroid of [5/8, 6/8)
+    13.0f/16.0f,  // 0.8125  — centroid of [6/8, 7/8)
+    15.0f/16.0f,  // 0.9375  — centroid of [7/8, 1]
+};
+
+void quantize_row_tq3_0_ref(const float * GGML_RESTRICT x, block_tq3_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * QK_K;
+
+        // Compute block absolute max (like Q4_0)
+        float amax = 0.0f;
+        for (int j = 0; j < QK_K; j++) {
+            float ax = fabsf(xb[j]);
+            if (ax > amax) amax = ax;
+        }
+        y[i].d = GGML_FP32_TO_FP16(amax);
+        float inv_d = amax > 0.0f ? 1.0f / amax : 0.0f;
+
+        memset(y[i].al, 0, sizeof(y[i].al));
+        memset(y[i].signs, 0, sizeof(y[i].signs));
+
+        for (int j = 0; j < QK_K; j++) {
+            float normalized = xb[j] * inv_d;  // in [-1, 1]
+
+            // Find best (grid_index, sign) pair
+            int best_idx = 0, best_sign = 0;
+            float best_err = 1e30f;
+            for (int g = 0; g < 4; g++) {
+                float gv = TQ_POLAR_GRID_4[g];
+                float ep = (normalized - gv) * (normalized - gv);
+                float en = (normalized + gv) * (normalized + gv);
+                if (ep < best_err) { best_err = ep; best_idx = g; best_sign = 0; }
+                if (en < best_err) { best_err = en; best_idx = g; best_sign = 1; }
+            }
+
+            // Pack 2-bit angle
+            int byte_idx = j / 4;
+            int shift = (j % 4) * 2;
+            y[i].al[byte_idx] |= (uint8_t)((best_idx & 0x3) << shift);
+
+            // Pack 1-bit sign
+            if (best_sign) {
+                y[i].signs[j / 8] |= (uint8_t)(1 << (j % 8));
+            }
+        }
+    }
+}
+
+void dequantize_row_tq3_0(const block_tq3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+
+        for (int j = 0; j < QK_K; j++) {
+            uint8_t angle_idx = (x[i].al[j / 4] >> ((j % 4) * 2)) & 0x3;
+            uint8_t sign      = (x[i].signs[j / 8] >> (j % 8)) & 0x1;
+            float grid_val    = TQ_POLAR_GRID_4[angle_idx];
+            y[i * QK_K + j]   = d * grid_val * (1.0f - 2.0f * sign);
+        }
+    }
+}
+
+void quantize_row_tq4_0_ref(const float * GGML_RESTRICT x, block_tq4_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * xb = x + i * QK_K;
+
+        // Compute block absolute max (like Q4_0)
+        float amax = 0.0f;
+        for (int j = 0; j < QK_K; j++) {
+            float ax = fabsf(xb[j]);
+            if (ax > amax) amax = ax;
+        }
+        y[i].d = GGML_FP32_TO_FP16(amax);
+        float inv_d = amax > 0.0f ? 1.0f / amax : 0.0f;
+
+        memset(y[i].al, 0, sizeof(y[i].al));
+        memset(y[i].ah, 0, sizeof(y[i].ah));
+        memset(y[i].signs, 0, sizeof(y[i].signs));
+
+        for (int j = 0; j < QK_K; j++) {
+            float normalized = xb[j] * inv_d;  // in [-1, 1]
+
+            // Find best (grid_index, sign) pair across all 8 entries x 2 polarities
+            int best_idx = 0, best_sign = 0;
+            float best_err = 1e30f;
+            for (int g = 0; g < 8; g++) {
+                float gv = TQ_POLAR_GRID_8[g];
+                float ep = (normalized - gv) * (normalized - gv);
+                float en = (normalized + gv) * (normalized + gv);
+                if (ep < best_err) { best_err = ep; best_idx = g; best_sign = 0; }
+                if (en < best_err) { best_err = en; best_idx = g; best_sign = 1; }
+            }
+
+            // Pack 2-bit angle (low)
+            int byte_idx = j / 4;
+            int shift = (j % 4) * 2;
+            y[i].al[byte_idx] |= (uint8_t)((best_idx & 0x3) << shift);
+
+            // Pack 1-bit angle (high)
+            if (best_idx & 0x4) {
+                y[i].ah[j / 8] |= (uint8_t)(1 << (j % 8));
+            }
+
+            // Pack 1-bit sign
+            if (best_sign) {
+                y[i].signs[j / 8] |= (uint8_t)(1 << (j % 8));
+            }
+        }
+    }
+}
+
+void dequantize_row_tq4_0(const block_tq4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+
+        for (int j = 0; j < QK_K; j++) {
+            uint8_t lo        = (x[i].al[j / 4] >> ((j % 4) * 2)) & 0x3;
+            uint8_t hi        = (x[i].ah[j / 8] >> (j % 8)) & 0x1;
+            uint8_t angle_idx = lo | (hi << 2);
+            uint8_t sign      = (x[i].signs[j / 8] >> (j % 8)) & 0x1;
+            float grid_val    = TQ_POLAR_GRID_8[angle_idx];
+            y[i * QK_K + j]   = d * grid_val * (1.0f - 2.0f * sign);
+        }
+    }
+}
+
+size_t quantize_tq3_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    GGML_UNUSED(imatrix);
+    size_t row_size = (size_t)(n_per_row / QK_K) * sizeof(block_tq3_0);
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_tq3_0_ref(src + row * n_per_row, (block_tq3_0 *)((char *)dst + row * row_size), n_per_row);
+    }
+    return nrows * row_size;
+}
+
+size_t quantize_tq4_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    GGML_UNUSED(imatrix);
+    size_t row_size = (size_t)(n_per_row / QK_K) * sizeof(block_tq4_0);
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_tq4_0_ref(src + row * n_per_row, (block_tq4_0 *)((char *)dst + row * row_size), n_per_row);
+    }
+    return nrows * row_size;
+}
+
 // ====================== "True" 2-bit (de)-quantization
 
 void dequantize_row_iq2_xxs(const block_iq2_xxs * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {

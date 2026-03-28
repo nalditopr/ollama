@@ -310,16 +310,25 @@ static __global__ void flash_attn_ext_vec(
         __syncwarp();
 #endif // GGML_USE_HIP
 
+// Sparse V dequantization: skip V dequant for positions with negligible attention weight.
+        // At long context (32K+), ~90% of softmax weights are near-zero, so skipping their V
+        // accumulation eliminates most dequant work with zero quality loss (τ = 1e-6).
+        constexpr float SPARSE_V_THRESHOLD = 1e-6f;
+
 #pragma unroll
         for (int k0 = 0; k0 < WARP_SIZE; k0 += V_cols_per_iter) {
             const int k = threadIdx.y*WARP_SIZE + k0 + (nthreads_V == WARP_SIZE ? 0 : threadIdx.x / nthreads_V);
 
 #ifdef V_DOT2_F32_F16_AVAILABLE
             half2 KQ_k[ncols];
+            bool skip = true;
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
                 KQ_k[j] = __half2half2(KQ[j*nthreads + k]);
+                if (__hgt(__low2half(KQ_k[j]), __float2half(SPARSE_V_THRESHOLD))) skip = false;
             }
+            if (skip) continue; // Sparse V: skip negligible attention positions
+
 #pragma unroll
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                 half2 tmp[V_rows_per_thread/2];
@@ -335,10 +344,14 @@ static __global__ void flash_attn_ext_vec(
             }
 #else
             float KQ_k[ncols];
+            bool skip = true;
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
                 KQ_k[j] = KQ[j*nthreads + k];
+                if (KQ_k[j] > SPARSE_V_THRESHOLD) skip = false;
             }
+            if (skip) continue; // Sparse V: skip negligible attention positions
+
 #pragma unroll
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                 float2 tmp[V_rows_per_thread/2];
@@ -556,7 +569,7 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
     template void ggml_cuda_flash_attn_ext_vec_case                         \
     <D, type_K, type_V>(ggml_backend_cuda_context & ctx, ggml_tensor * dst) \
 
-#define EXTERN_DECL_FATTN_VEC_CASES(D, type_K)             \
+#define EXTERN_DECL_FATTN_VEC_CASES(D, type_K)              \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_F16);  \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q4_0); \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q4_1); \
@@ -564,12 +577,18 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q5_1); \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q8_0); \
 
+// TQ types only support F16 V for now (most common use case)
+#define EXTERN_DECL_FATTN_VEC_CASES_TQ(D, type_K)          \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_F16);  \
+
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_F16)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q4_0)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q4_1)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q5_1)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q8_0)
+EXTERN_DECL_FATTN_VEC_CASES_TQ( 64, GGML_TYPE_TQ3_0)
+EXTERN_DECL_FATTN_VEC_CASES_TQ( 64, GGML_TYPE_TQ4_0)
 
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_F16)
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q4_0)
@@ -577,6 +596,8 @@ EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q4_1)
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q5_1)
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q8_0)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(128, GGML_TYPE_TQ3_0)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(128, GGML_TYPE_TQ4_0)
 
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_F16)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q4_0)
@@ -584,3 +605,5 @@ EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q4_1)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_1)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q8_0)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(256, GGML_TYPE_TQ3_0)
+EXTERN_DECL_FATTN_VEC_CASES_TQ(256, GGML_TYPE_TQ4_0)

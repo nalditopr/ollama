@@ -495,8 +495,8 @@ func createModel(r api.CreateRequest, name model.Name, baseLayers []*layerGGML, 
 				}
 
 				ft := layer.GGML.KV().FileType()
-				if !slices.Contains([]string{"F16", "F32"}, ft.String()) {
-					return errors.New("quantization is only supported for F16 and F32 models")
+				if !slices.Contains([]string{"F16", "F32", "BF16"}, ft.String()) {
+					return errors.New("quantization is only supported for F16, BF16 and F32 models")
 				} else if ft != want {
 					layer, err = quantizeLayer(layer, quantType, fn)
 					if err != nil {

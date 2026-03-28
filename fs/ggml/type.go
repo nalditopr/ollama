@@ -48,6 +48,8 @@ const (
 	fileTypeQ4_0_8_8 // unused by GGML
 	fileTypeTQ1_0
 	fileTypeTQ2_0
+	FileTypeTQ3_0
+	FileTypeTQ4_0
 
 	FileTypeUnknown = 1024
 )
@@ -68,6 +70,10 @@ func ParseFileType(s string) (FileType, error) {
 		return FileTypeQ4_K_M, nil
 	case "BF16":
 		return FileTypeBF16, nil
+	case "TQ3_0":
+		return FileTypeTQ3_0, nil
+	case "TQ4_0":
+		return FileTypeTQ4_0, nil
 	default:
 		supportedFileTypes := []FileType{
 			FileTypeF32,
@@ -75,6 +81,8 @@ func ParseFileType(s string) (FileType, error) {
 			FileTypeQ4_K_S,
 			FileTypeQ4_K_M,
 			FileTypeQ8_0,
+			FileTypeTQ3_0,
+			FileTypeTQ4_0,
 			// fsggml.FileTypeBF16, // TODO
 		}
 		strs := make([]string, len(supportedFileTypes))
@@ -127,6 +135,10 @@ func (t FileType) String() string {
 		return "Q2_K_S"
 	case FileTypeBF16:
 		return "BF16"
+	case FileTypeTQ3_0:
+		return "TQ3_0"
+	case FileTypeTQ4_0:
+		return "TQ4_0"
 	default:
 		return "unknown"
 	}
@@ -176,6 +188,10 @@ func (ftype FileType) ToTensorType() TensorType {
 		return TensorTypeBF16
 	case fileTypeMXFP4:
 		return TensorTypeMXFP4
+	case FileTypeTQ3_0:
+		return TensorTypeTQ3_0
+	case FileTypeTQ4_0:
+		return TensorTypeTQ4_0
 	default:
 		slog.Warn("unsupported file type", "type", ftype)
 		return 0 // F32
@@ -227,6 +243,8 @@ const (
 	tensorTypeIQ4_NL_4_8 // unused by GGML
 	tensorTypeIQ4_NL_8_8 // unused by GGML
 	TensorTypeMXFP4
+	TensorTypeTQ3_0
+	TensorTypeTQ4_0
 )
 
 // ParseTensorType parses the provided GGUF tensor type
@@ -267,6 +285,10 @@ func ParseTensorType(s string) (TensorType, error) {
 		return TensorTypeBF16, nil
 	case "MXFP4":
 		return TensorTypeMXFP4, nil
+	case "TQ3_0":
+		return TensorTypeTQ3_0, nil
+	case "TQ4_0":
+		return TensorTypeTQ4_0, nil
 	default:
 		return 0, fmt.Errorf("unsupported quantization type %s", s)
 	}
@@ -321,6 +343,10 @@ func (t TensorType) String() string {
 		return "BF16"
 	case 4, TensorTypeMXFP4:
 		return "MXFP4"
+	case TensorTypeTQ3_0:
+		return "TQ3_0"
+	case TensorTypeTQ4_0:
+		return "TQ4_0"
 	default:
 		return "unknown"
 	}

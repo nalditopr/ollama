@@ -4,6 +4,15 @@
 
 #include <cstdint>
 
+// TurboQuant uniform grid lookup tables (used by vec_dot_tq*_q8_1)
+static __device__ const float TQ_GRID_4[4] = {
+    1.0f/8.0f, 3.0f/8.0f, 5.0f/8.0f, 7.0f/8.0f,
+};
+static __device__ const float TQ_GRID_8[8] = {
+    1.0f/16.0f, 3.0f/16.0f, 5.0f/16.0f, 7.0f/16.0f,
+    9.0f/16.0f, 11.0f/16.0f, 13.0f/16.0f, 15.0f/16.0f,
+};
+
 static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32) {
     const uint8_t * x8 = (const uint8_t *) x;
 
@@ -1220,4 +1229,65 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
 
     const float d = __half2float(bq4->d) * __low2float(bq8_1[iqs/4].ds);
     return d * sumi;
+}
+
+#define VDR_TQ3_0_Q8_1_MMVQ 1
+#define VDR_TQ3_0_Q8_1_MMQ  1
+
+static __device__ __forceinline__ float vec_dot_tq3_0_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_tq3_0 * bq3 = (const block_tq3_0 *) vbq + kbx;
+    const float d = __half2float(bq3->d);
+
+    // Each call processes QR_TQ3_0 = 4 elements
+    float sum = 0.0f;
+    const int base = iqs * QR_TQ3_0;
+
+#pragma unroll
+    for (int l = 0; l < QR_TQ3_0; ++l) {
+        const int j = base + l;
+        const uint8_t angle_idx = (bq3->al[j/4] >> ((j%4)*2)) & 0x3;
+        const uint8_t sign      = (bq3->signs[j/8] >> (j%8)) & 0x1;
+        const float dequant     = TQ_GRID_4[angle_idx] * (1.0f - 2.0f * sign);
+
+        // Get corresponding q8_1 value
+        const int ib8 = j / QK8_1;
+        const int jj  = j % QK8_1;
+        sum += d * dequant * bq8_1[ib8].qs[jj];
+    }
+
+    // Scale by q8 delta
+    const int ib8 = (base) / QK8_1;
+    return sum * __low2float(bq8_1[ib8].ds);
+}
+
+#define VDR_TQ4_0_Q8_1_MMVQ 1
+#define VDR_TQ4_0_Q8_1_MMQ  1
+
+static __device__ __forceinline__ float vec_dot_tq4_0_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_tq4_0 * bq4 = (const block_tq4_0 *) vbq + kbx;
+    const float d = __half2float(bq4->d);
+
+    float sum = 0.0f;
+    const int base = iqs * QR_TQ4_0;
+
+#pragma unroll
+    for (int l = 0; l < QR_TQ4_0; ++l) {
+        const int j = base + l;
+        const uint8_t lo  = (bq4->al[j/4] >> ((j%4)*2)) & 0x3;
+        const uint8_t hi  = (bq4->ah[j/8] >> (j%8)) & 0x1;
+        const uint8_t idx = lo | (hi << 2);
+        const uint8_t sign = (bq4->signs[j/8] >> (j%8)) & 0x1;
+        const float dequant = TQ_GRID_8[idx] * (1.0f - 2.0f * sign);
+
+        const int ib8 = j / QK8_1;
+        const int jj  = j % QK8_1;
+        sum += d * dequant * bq8_1[ib8].qs[jj];
+    }
+
+    const int ib8 = (base) / QK8_1;
+    return sum * __low2float(bq8_1[ib8].ds);
 }

@@ -104,6 +104,18 @@ void quantize_row_tq2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, 
     quantize_row_tq2_0_ref(x, y, k);
 }
 
+void quantize_row_tq3_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    assert(k % QK_K == 0);
+    block_tq3_0 * GGML_RESTRICT y = vy;
+    quantize_row_tq3_0_ref(x, y, k);
+}
+
+void quantize_row_tq4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    assert(k % QK_K == 0);
+    block_tq4_0 * GGML_RESTRICT y = vy;
+    quantize_row_tq4_0_ref(x, y, k);
+}
+
 //===================================== Q8_K ==============================================
 
 void quantize_row_q8_K_generic(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
@@ -414,6 +426,88 @@ void ggml_vec_dot_tq2_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     }
 
     *s = sumf;
+}
+
+// TurboQuant uniform grid LUTs for CPU vec_dot (amax-normalized)
+static const float tq_cpu_grid_4[4] = {
+    1.0f/8.0f, 3.0f/8.0f, 5.0f/8.0f, 7.0f/8.0f,
+};
+
+static const float tq_cpu_grid_8[8] = {
+    1.0f/16.0f, 3.0f/16.0f, 5.0f/16.0f, 7.0f/16.0f,
+    9.0f/16.0f, 11.0f/16.0f, 13.0f/16.0f, 15.0f/16.0f,
+};
+
+void ggml_vec_dot_tq3_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_tq3_0 * GGML_RESTRICT x = vx;
+    const block_q8_K  * GGML_RESTRICT y = vy;
+
+    const int nb = n / QK_K;
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d);
+        float sumi = 0.0f;
+
+        for (int j = 0; j < QK_K; j++) {
+            uint8_t angle_idx = (x[i].al[j / 4] >> ((j % 4) * 2)) & 0x3;
+            uint8_t sign      = (x[i].signs[j / 8] >> (j % 8)) & 0x1;
+            float grid_val    = tq_cpu_grid_4[angle_idx];
+            float dequant     = grid_val * (1.0f - 2.0f * sign);
+            sumi += dequant * y[i].qs[j];
+        }
+
+        sumf += sumi * d;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_tq4_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_tq4_0 * GGML_RESTRICT x = vx;
+    const block_q8_K  * GGML_RESTRICT y = vy;
+
+    const int nb = n / QK_K;
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d);
+        float sumi = 0.0f;
+
+        for (int j = 0; j < QK_K; j++) {
+            uint8_t lo        = (x[i].al[j / 4] >> ((j % 4) * 2)) & 0x3;
+            uint8_t hi        = (x[i].ah[j / 8] >> (j % 8)) & 0x1;
+            uint8_t angle_idx = lo | (hi << 2);
+            uint8_t sign      = (x[i].signs[j / 8] >> (j % 8)) & 0x1;
+            float grid_val    = tq_cpu_grid_8[angle_idx];
+            float dequant     = grid_val * (1.0f - 2.0f * sign);
+            sumi += dequant * y[i].qs[j];
+        }
+
+        sumf += sumi * d;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_tq3_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_tq3_0_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
+}
+
+void ggml_vec_dot_tq4_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_tq4_0_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
 }
 
 void ggml_vec_dot_q2_K_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
