@@ -251,3 +251,21 @@ OLLAMA_KV_CACHE_TYPE=turbo3 OLLAMA_FLASH_ATTENTION=true
 | [RemizovDenis/turboquant](https://github.com/RemizovDenis/turboquant) | MoE expert caching, adaptive bitwidth | Future reference |
 | [peva3/turboquant-h2o-streamingllm](https://github.com/peva3/turboquant-h2o-streamingllm) | H2O eviction + attention sinks | Future reference |
 | [nalditopr/llama-cpp-turboquant](https://github.com/nalditopr/llama-cpp-turboquant) | CUDA port, RotorQuant optimizations | Self-reference |
+
+---
+
+## Update: GPT-OSS 120B MXFP4 Working!
+
+The CPU offload crash was caused by turbo3 KV on CPU layers, not the model architecture.
+With q4_0 KV cache (built-in Ollama type), the 120B MoE model runs with GPU offload.
+
+**GPT-OSS 120B MXFP4 + q4_0 KV + FA (RTX 5090 + CPU offload):**
+- 17/37 layers on GPU (27.3 GB), 31.7 GB on CPU
+- Prompt: 27.3 tok/s
+- Gen: 19.1 tok/s
+- Math: 391 ✓ (17*23)
+- **120B MoE running on a single consumer GPU!**
+
+### Rule of Thumb:
+- **Model fits entirely on GPU** → use `turbo3` KV (4.6x compression, fastest)
+- **Model needs CPU offload** → use `q4_0` KV (4x compression, CPU-compatible)
