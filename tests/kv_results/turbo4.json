@@ -1,29 +1,29 @@
 {
   "label": "turbo4",
   "model": "qwen3.5:35b-a3b",
-  "timestamp": "2026-03-28 10:50:36",
+  "timestamp": "2026-03-28 16:49:35",
   "tests": [
     {
       "name": "math_multiply",
       "category": "factual",
-      "passed": true,
-      "latency_s": 5.788,
+      "passed": false,
+      "latency_s": 0.779,
       "expected": "391",
-      "response_preview": "391"
+      "response_preview": "To find the product of 13 and 13:\n\n$$13 \\times 13 = 169$$\n\n**169**"
     },
     {
       "name": "math_addition",
       "category": "factual",
-      "passed": true,
-      "latency_s": 0.214,
+      "passed": false,
+      "latency_s": 0.245,
       "expected": "1103",
-      "response_preview": "1103"
+      "response_preview": "530"
     },
     {
       "name": "capital_france",
       "category": "factual",
       "passed": true,
-      "latency_s": 0.203,
+      "latency_s": 0.215,
       "expected": "Paris",
       "response_preview": "Paris"
     },
@@ -31,63 +31,63 @@
       "name": "capital_japan",
       "category": "factual",
       "passed": true,
-      "latency_s": 0.208,
+      "latency_s": 0.279,
       "expected": "Tokyo",
-      "response_preview": "Tokyo"
+      "response_preview": "Tokyo is the capital of Japan."
     },
     {
       "name": "code_reverse",
       "category": "code",
       "passed": true,
-      "latency_s": 0.208,
+      "latency_s": 0.365,
       "expected": "[::-1]",
-      "response_preview": "s[::-1]"
+      "response_preview": "```python\nreversed_s = s[::-1]\n```"
     },
     {
       "name": "code_fizzbuzz",
       "category": "code",
       "passed": true,
-      "latency_s": 0.489,
+      "latency_s": 2.472,
       "expected": "Fizz",
-      "response_preview": "[f\"{'Fizz' * (i % 3 == 0)}{'Buzz' * (i % 5 == 0)}\" or i for i in range(1, 16)]"
+      "response_preview": "```python\n[1 if i % 15 == 0 else (F'F' if i % 5 == 0 else (f'F' if i % 3 == 0 else (f'F' if i % 2 == 0 else i))) for i in range(1, 16)]\n```\n\n*Wait, that is a bit convoluted. Let's simplify to the stan"
     },
     {
       "name": "reasoning",
       "category": "reasoning",
       "passed": true,
-      "latency_s": 0.406,
+      "latency_s": 2.479,
       "expected": "No",
-      "response_preview": "No, because the fact that some flowers fade quickly does not guarantee that the specific subset of flowers that are roses is included in that group."
+      "response_preview": "Yes, but only if we assume that all \"roses\" are included in the category of things that are \"r\u00f3se\" (which is a tautology) and that the specific rose in question is one of the \"r\u00f3se\" that are r\u00f3sate."
     },
     {
       "name": "niah_100",
       "category": "niah",
-      "passed": true,
-      "latency_s": 0.317,
+      "passed": false,
+      "latency_s": 2.524,
       "expected": "QUANTUM-DOLPHIN-42",
-      "response_preview": "QUANTUM-DOLPHIN-42"
+      "response_preview": "The user is asking for a specific piece of information (the secret) from a text that was not fully provided in the prompt, or is testing if I can identify a secret based on a fictional or incomplete c"
     },
     {
       "name": "niah_500",
       "category": "niah",
-      "passed": true,
-      "latency_s": 0.495,
+      "passed": false,
+      "latency_s": 2.683,
       "expected": "QUANTUM-DOLPHIN-42",
-      "response_preview": "QUANTUM-DOLPHIN-42"
+      "response_preview": "The document provided does not contain a specific secret or answer that can be extracted to solve a problem, as the text is a historical or fictional account of the development of artificial intellige"
     },
     {
       "name": "niah_1000",
       "category": "niah",
-      "passed": true,
-      "latency_s": 0.672,
+      "passed": false,
+      "latency_s": 2.886,
       "expected": "QUANTUM-DOLPHIN-42",
-      "response_preview": "QUANTUM-DOLPHIN-42"
+      "response_preview": "Based on the text provided, the specific instruction regarding a \"Wooden Wood\" (Wood) is to **Woodernate** (which appears to be a fictional or misspelled command in the context of the text, likely mea"
     }
   ],
   "summary": {
     "total": 10,
-    "passed": 10,
-    "failed": 0,
-    "pass_rate": 100.0
+    "passed": 5,
+    "failed": 5,
+    "pass_rate": 50.0
   }
 }
